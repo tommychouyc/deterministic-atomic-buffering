@@ -435,7 +435,8 @@ public:
 
    void init();
    void cycle();
-   bool active(); 
+   bool active();
+   bool really_active();
    bool cycle_insn_cta_max_hit() {
        return (m_config.gpu_max_cycle_opt && (gpu_tot_sim_cycle + gpu_sim_cycle) >= m_config.gpu_max_cycle_opt) ||
            (m_config.gpu_max_insn_opt && (gpu_tot_sim_insn + gpu_sim_insn) >= m_config.gpu_max_insn_opt) ||
@@ -559,6 +560,8 @@ private:
 
 
 public:
+   int cluster_to_flush;
+   unsigned long long m_extended_buffer_flush_reqs;
    unsigned long long  gpu_sim_insn;
    unsigned long long  gpu_tot_sim_insn;
    unsigned long long  gpu_sim_insn_last_update;

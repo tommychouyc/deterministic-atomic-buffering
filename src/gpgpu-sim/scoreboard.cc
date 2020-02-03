@@ -89,6 +89,10 @@ void Scoreboard::reserveRegisters(const class warp_inst_t* inst)
                             "Reserved register - warp:%d, reg: %d\n",
                             inst->warp_id(),
                             inst->out[r] );
+			/*printf(
+                            "Reserved register - warp:%d, reg: %d\n",
+                            inst->warp_id(),
+                            inst->out[r] );*/
         }
     }
 
@@ -121,6 +125,10 @@ void Scoreboard::releaseRegisters(const class warp_inst_t *inst)
                             "Register Released - warp:%d, reg: %d\n",
                             inst->warp_id(),
                             inst->out[r] );
+			/*printf(
+                            "Register Released - warp:%d, reg: %d\n",
+                            inst->warp_id(),
+                            inst->out[r] );*/
             releaseRegister(inst->warp_id(), inst->out[r]);
             longopregs[inst->warp_id()].erase(inst->out[r]);
         }

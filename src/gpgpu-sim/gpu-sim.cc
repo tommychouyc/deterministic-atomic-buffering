@@ -774,6 +774,9 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    //Jin: functional simulation for CDP
    m_functional_sim = false;
    m_functional_sim_kernel = NULL;
+
+   cluster_to_flush = 0;
+   m_extended_buffer_flush_reqs = 0;
 }
 
 int gpgpu_sim::shared_mem_size() const
@@ -874,6 +877,31 @@ bool gpgpu_sim::active()
     if( icnt_busy() )
         return true;
     if( get_more_cta_left() )
+        return true;
+    return false;
+}
+
+bool gpgpu_sim::really_active()
+{
+    if (m_config.gpu_max_cycle_opt && (gpu_tot_sim_cycle + gpu_sim_cycle) >= m_config.gpu_max_cycle_opt) 
+       return false;
+    if (m_config.gpu_max_insn_opt && (gpu_tot_sim_insn + gpu_sim_insn) >= m_config.gpu_max_insn_opt) 
+       return false;
+    if (m_config.gpu_max_cta_opt && (gpu_tot_issued_cta >= m_config.gpu_max_cta_opt) )
+       return false;
+    if (m_config.gpu_deadlock_detect && gpu_deadlock) 
+       return false;
+    for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) 
+       if( m_cluster[i]->get_not_completed()>0 ) 
+           return true;;
+    for (unsigned i=0;i<m_memory_config->m_n_mem;i++) 
+       if( m_memory_partition_unit[i]->busy()>0 )
+           return true;;
+    if( icnt_busy() )
+        return true;
+    if( get_more_cta_left() )
+        return true;
+    if( m_extended_buffer_flush_reqs > 0 )
         return true;
     return false;
 }
@@ -1759,6 +1787,54 @@ void gpgpu_sim::cycle()
       }
       try_snap_shot(gpu_sim_cycle);
       spill_log_to_file (stdout, 0, gpu_sim_cycle);
+
+      /*if(!(active())){
+         printf("GPU not active anymore\n");
+         // perform flush
+         for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
+            printf("Flushing cluster %d\n", i);
+            //m_extended_buffer_flush_reqs += m_cluster[i]->extended_buffer_flush_all();
+            m_cluster[i]->extended_buffer_flush_all();
+         }
+         //m_extended_buffer_flush_reqs = 0; //re move later
+         printf("Finished generating final flush requests before kernel exit\n");
+      }*/
+      /*printf("Cycle: %d, Buffer flush checking phase\n", gpu_sim_cycle);
+      for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
+         m_cluster[i]->extended_buffer_flush_all();
+      }*/
+
+      unsigned num_flushed = 0;
+      int flushed = 0;
+      bool done;
+      for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
+         if(m_cluster[i]->check_everything_done_except_flush()){ // FIX, try with 1 cycle flush first
+            
+         }
+         else {
+            done = false;
+            break;
+         }
+         done = true;
+      }
+
+      if(done){ // check if everythings done, flush 1 cluster per cycle, do i need to check if m_extended_buffer_flush_reqs == 0?
+         printf("Cycle: %d, Kernel Exit Flush\n", gpu_sim_cycle);
+         for( unsigned i=0; i < m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster; i++ ){
+            for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+               flushed = m_cluster[cluster_to_flush]->m_core[i]->extended_buffer_flush(warp_id);
+               num_flushed += flushed;
+               if(flushed){
+                  printf("Flushing cluster: %d, core: %d, warp: %d, buffers_flushed: %d, total flushed: %u\n", cluster_to_flush, i, warp_id, flushed, num_flushed);
+               }
+            }
+         }
+      }
+      if (num_flushed) {
+         cluster_to_flush++;
+         cluster_to_flush = cluster_to_flush % (m_shader_config->n_simt_clusters);
+      }
+      m_extended_buffer_flush_reqs += num_flushed;
 
 #if (CUDART_VERSION >= 5000)
       //launch device kernel

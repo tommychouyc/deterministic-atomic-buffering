@@ -46,6 +46,7 @@
 #include <limits.h>
 #include "traffic_breakdown.h"
 #include "shader_trace.h"
+#include "../cuda-sim/ptx_ir.h"
 
 #define PRIORITIZE_MSHR_OVER_WB 1
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -133,6 +134,10 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
     m_L1I = new read_only_cache( name,m_config->m_L1I_config,m_sid,get_shader_instruction_cache_id(),m_icnt,IN_L1I_MISS_QUEUE);
     
     m_warp.resize(m_config->max_warps_per_shader, shd_warp_t(this, warp_size));
+    for(unsigned i = 0; i < m_config->max_warps_per_shader; i++){
+        m_warp[i].m_extended_buffer = new extended_buffer();
+    }
+
     m_scoreboard = new Scoreboard(m_sid, m_config->max_warps_per_shader);
     
     //scedulers
@@ -776,8 +781,9 @@ void shader_core_ctx::fetch()
             for( unsigned i=0; i < m_config->max_warps_per_shader; i++ ) {
                 unsigned warp_id = (m_last_warp_fetched+1+i) % m_config->max_warps_per_shader;
 
-                // this code checks if this warp has finished executing and can be reclaimed
-                if( m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit() ) {
+                // this code checks if this warp has finished executing and can be reclaimed  !m_warp[warp_id].m_extended_buffer_freshly_initialied &&
+                //if( m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit() ) {
+                if(!m_warp[warp_id].m_extended_buffer_in_use &&  m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){
                     bool did_exit=false;
                     for( unsigned t=0; t<m_config->warp_size;t++) {
                         unsigned tid=warp_id*m_config->warp_size+t;
@@ -841,27 +847,311 @@ void shader_core_ctx::fetch()
     m_L1I->cycle();
 }
 
-void shader_core_ctx::func_exec_inst( warp_inst_t &inst )
+void shader_core_ctx::func_exec_inst( warp_inst_t &inst, unsigned warpId, const active_mask_t &active_mask )
 {
-    execute_warp_inst_t(inst);
+    //execute_warp_inst_t(inst);
+    core_execute_warp_inst_t_atomic_add(inst, active_mask, warpId);
+    
     if( inst.is_load() || inst.is_store() )
     {
-	inst.generate_mem_accesses();
-        //inst.print_m_accessq();	
+        // generate mem access for atomics only on buffer flush
+        /*if(inst.isatomic()){
+            printf("@@@@@@@@@@@ In generate_mem_access, warpId: %d @@@@@@@@@@@\n", warpId);
+            //m_warp[warpId].extended_buffer_print_contents();
+            extended_buffer warp_buffer =  m_warp[warpId].get_extended_buffer();
+            inst.generate_extended_buffer_mem_accesses(); // maybe it should go before
+            
+            //inst.generate_extended_buffer_mem_accesses(); // dont need another version, just make the mf and dump to inct
+            printf("@@@@@@@@@@@@@@@@@@@@@@@@@@ END @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
+        }
+        else {*/
+            inst.generate_mem_accesses();
+            //inst.print_m_accessq();
+        //}
     }	
 }
 
-void shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t* next_inst, const active_mask_t &active_mask, unsigned warp_id, unsigned sch_id )
+void buffer_flush_atomic_callback( const inst_t* inst, ptx_thread_info* thread, new_addr_type addr, float buffer_value)
+{
+    printf("In buffer_flush_atomic_callback\n");
+    //return;
+    // TODO
+    const ptx_instruction *pI = dynamic_cast<const ptx_instruction*>(inst); // somehow pI is 0x0
+
+    // "Decode" the output type
+    /*unsigned to_type = pI->get_type(); // cant do this cuz the pI is 0 for some reason
+    size_t size;
+    int t;
+    type_info_key::type_decode(to_type, size, t); // or maybe i just need to hardcode the size*/
+    size_t size = 32;
+
+    ptx_reg_t data;        // d
+    ptx_reg_t src1_data;   // a
+    ptx_reg_t src2_data;   // b
+    ptx_reg_t op_result;   // temp variable to hold operation result
+
+    src1_data.u64 = addr;
+    src2_data.f32 = buffer_value;
+
+    extern gpgpu_sim *g_the_gpu;
+    memory_space *mem = NULL;
+    addr_t effective_address = src1_data.u64;  
+    mem = g_the_gpu->get_global_memory();
+    mem->read(effective_address,size/8,&data.s64);
+
+    op_result.f32 = data.f32 + src2_data.f32;
+    mem->write(effective_address,size/8,&op_result.s64,thread,pI);
+
+}
+
+int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for m_extended_buffer_full_stall except for the final kernel end flush
+{
+    if(!(m_warp[warpId].m_extended_buffer_in_use)){
+        return 0;
+    }
+    assert(m_warp[warpId].m_extended_buffer_in_use);
+
+    if(m_icnt->full(32,true)){
+        printf("interconnect full when trying to flush extended buffer\n");
+        return 0;
+    }
+    int slots_flushed = 0;
+    printf("@@@@@@@@@@@ In extended_buffer_flush @@@@@@@@@@@\n");
+    for( int i = 0; i < m_warp[warpId].extended_buffer_num_entries; i++){ // only generate mf for the entries that are in use, aka addr != 0
+        new_addr_type addr = m_warp[warpId].m_extended_buffer->address_list[i];
+        if (addr != 0 && !m_warp[warpId].m_extended_buffer->flushed[i]){
+            // Make the mem_access
+            const mem_access_t &buffer_mem_access = m_warp[warpId].extended_buffer_generate_mem_access_for_entry(i); // TODO: FIX this function to only make the mask to 1 thread
+
+            // Make the inst for mem_fetch
+            warp_inst_t* inst = new warp_inst_t(m_config);
+            inst->set_cache_op(CACHE_GLOBAL);
+            inst->set_op(ATOMIC_OP);
+            inst->set_oprnd_type(FP_OP);
+            inst->set_space(global_space);
+            inst->set_memory_op(no_memory_op);
+            inst->set_data_size(32); // not sure if 32
+            inst->set_m_warp_id(warpId); // maybe
+            inst->set_out(666); //maaaaaaaaaaaybeeeeeeeeee, hard coded value
+            inst->set_outcount(1); // hardcode
+            //inst->set_in();
+            //inst->set_incount(0);
+            //m_ldst_unit->m_pending_writes[warpId][666] += 1; // what should this be? the original atomic handled this
+
+            // active mask shoud be only 1 bit since the bits of the mask determine which threads perform their callback, 
+            // so i only need 1 thread in the warp to perform 1 callback since i only have 1 buffer value
+            active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
+            for( unsigned i=0; i < m_config->warp_size; i++ ){
+                if( active_mask.test(i) ){
+                    //new_addr_type t_addr = addr + 4*i; // dont need t_addr
+                    inst->set_addr((unsigned)i,addr); // can get address from the already created mem_access
+                    unsigned warp_id = warpId;
+                    // unique hardware warp id across the entire GPU
+                    unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
+
+                    // Add callback to the inst to perform the flush atomic
+                    //inst->add_eb_rop_callback(i, buffer_flush_atomic_callback, inst, NULL, true, m_warp[warpId].extended_buffer_convert_to_float(addr), addr);
+                    inst->add_eb_rop_callback(i, buffer_flush_atomic_callback, inst, NULL, true, m_warp[warpId].extended_buffer_get_value(addr), addr);
+                    printf("addr: %u, val: %f\n", addr, m_warp[warpId].extended_buffer_get_value(addr));
+                }
+            }
+
+            // Make the mem_fetch
+            inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[0]->get_schd_id()); // is the schd_id correct?
+		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
+		    m_icnt->push(mf);
+
+            // TODO: maybe increment some logs
+            //inc_store_req( warpId );
+            m_warp[warpId].inc_n_atomic(); // maybe
+            // TODO: probably should clear the slot afterwards
+            //m_warp[warpId].extended_buffer_clear_slot_value(addr);
+            //m_warp[warpId].extended_buffer_clear_slot(addr);
+            m_warp[warpId].m_extended_buffer->flushed[i] = true;
+            slots_flushed++;
+        }
+    }
+    //m_warp[warpId].extended_buffer_clear_all();
+    return slots_flushed;
+}
+
+void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, const active_mask_t &active_mask, unsigned warpId)
+{
+    for ( unsigned t=0; t < m_warp_size; t++ ) {
+        if( inst.active(t) ) {
+            if(warpId==(unsigned (-1)))
+                warpId = inst.warp_id();
+            unsigned tid=m_warp_size*warpId+t;
+            if((*(m_thread[tid])).func_info()->get_instruction((*(m_thread[tid])).get_pc())->get_atomic() == 393){ // atomic_add
+                if(active_mask[t]){
+                    // get the operand value and address then add it to the corresponding buffer
+                    addr_t insn_memaddr = (*(m_thread[tid])).last_eaddr();
+                    //float insn_operand = (*(m_thread[tid])).func_info()->get_instruction((*(m_thread[tid])).get_pc())->src2().get_literal_value().f32;
+                    const ptx_instruction *pI = (*(m_thread[tid])).func_info()->get_instruction((*(m_thread[tid])).get_pc());
+                    ptx_thread_info *thread = m_thread[tid];
+                    // "Decode" the output type
+                    unsigned to_type = pI->get_type();
+                    size_t size;
+                    int tee;
+                    type_info_key::type_decode(to_type, size, tee);
+
+                    // Set up operand variables
+                    ptx_reg_t data;        // d
+                    ptx_reg_t src1_data;   // a
+                    ptx_reg_t src2_data;   // b
+                    ptx_reg_t op_result;   // temp variable to hold operation result
+
+                    bool data_ready = false;
+
+                    // Get operand info of sources and destination
+                    const operand_info &dst  = pI->dst();     // d
+                    const operand_info &src1 = pI->src1();    // a
+                    const operand_info &src2 = pI->src2();    // b
+
+                    // Get operand values
+                    src1_data = thread->get_operand_value(src1, src1, to_type, thread, 1);        // a
+                    if (dst.get_symbol()->type()){
+                        src2_data = thread->get_operand_value(src2, dst, to_type, thread, 1);      // b
+                    } else {
+                        //This is the case whent he first argument (dest) is '_'
+                        src2_data = thread->get_operand_value(src2, src1, to_type, thread, 1);     // b
+                    }
+                    float insn_operand = src2_data.f32;
+                    printf("Executing atomic_add for warp: %u thread: %u, tid: %u, addr: %llu, val: %f\n", warpId, t, tid, insn_memaddr, insn_operand);
+
+                    // find which buffer slot to write to and occupy the slot by writing to the address list
+                    printf("===============================core_execute_warp_inst_t_atomic_add===============================\n");
+                    //const ptx_instruction *pI = (*(m_thread[tid])).func_info()->get_instruction((*(m_thread[tid])).get_pc());
+                    m_warp[warpId].extended_buffer_occupy_slot(insn_memaddr, &inst);
+                    m_warp[warpId].extended_buffer_fp32_add(insn_memaddr, insn_operand);
+                    m_warp[warpId].extended_buffer_print_contents();
+                    
+                    // mark the instruction as complete?
+                    //float extended_buffer_val = m_warp[warpId].extended_buffer_convert_to_float(insn_memaddr);
+                    float extended_buffer_val = m_warp[warpId].extended_buffer_get_value(insn_memaddr);
+                    m_thread[tid]->ptx_exec_inst_atomic_add_only(inst,t,extended_buffer_val,true); // i think this advances the pc and stuff
+
+                    //m_thread[tid]->ptx_exec_inst(inst,t); // replace this with buffer add
+                    printf("####################### END core_execute_warp_inst_t_atomic_add #######################\n");
+                }
+            }
+            else{
+                m_thread[tid]->ptx_exec_inst(inst,t);
+            }
+            //m_thread[tid]->ptx_exec_inst(inst,t);
+
+            //virtual function
+            checkExecutionStatusAndUpdate(inst,t,tid);
+        }
+    } 
+}
+
+void find_atomic_address( const ptx_instruction *pI, ptx_thread_info *thread )
+{   
+   // SYNTAX
+   // atom.space.operation.type d, a, b[, c]; (now read in callback)
+
+   // obtain memory space of the operation 
+   memory_space_t space = pI->get_space(); 
+
+   // get the memory address
+   const operand_info &src1 = pI->src1();
+   // const operand_info &dst  = pI->dst();  // not needed for effective address calculation 
+   unsigned i_type = pI->get_type();
+   ptx_reg_t src1_data;
+   src1_data = thread->get_operand_value(src1, src1, i_type, thread, 1);
+   addr_t effective_address = src1_data.u64; 
+
+   addr_t effective_address_final; 
+
+   // handle generic memory space by converting it to global 
+   if ( space == undefined_space ) {
+      if( whichspace(effective_address) == global_space ) {
+         effective_address_final = generic_to_global(effective_address);
+         space = global_space;
+      } else if( whichspace(effective_address) == shared_space ) {
+         unsigned smid = thread->get_hw_sid();
+         effective_address_final = generic_to_shared(smid,effective_address);
+         space = shared_space;
+      } else {
+         abort();
+      }
+   } else {
+      assert( space == global_space || space == shared_space );
+      effective_address_final = effective_address; 
+   }
+
+   // Check state space
+   assert( space == global_space || space == shared_space );
+
+   thread->m_last_effective_address = effective_address_final;
+   thread->m_last_memory_space = space;
+   //thread->m_last_dram_callback.function = atom_callback;
+   //thread->m_last_dram_callback.instruction = pI; 
+}
+
+bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t* next_inst, const active_mask_t &active_mask, unsigned warp_id, unsigned sch_id )
 {
 	warp_inst_t** pipe_reg = pipe_reg = pipe_reg_set.get_free(m_config->sub_core_model, sch_id);
     assert(pipe_reg);
+
+    if(next_inst->op==ATOMIC_OP || next_inst->isatomic()){
+        // check buffer to see if full or not
+        printf("####################### ISSUE_WARP #######################\n");
+        printf("Cycle: %d, warp id: %u, m_thread: %u, buff locations remaining: %d, buff full: %d, full stall: %d\n", gpu_sim_cycle, warp_id, m_thread, m_warp[warp_id].extended_buffer_locations_remaining(), m_warp[warp_id].extended_buffer_full(), m_warp[warp_id].get_extended_buffer_full_stall());
+        if(m_warp[warp_id].extended_buffer_full()){
+            m_warp[warp_id].set_extended_buffer_full_stall();
+            // flush the buffer here
+            //extended_buffer_flush(warp_id);
+            //m_warp[warp_id].extended_buffer_clear_all();
+            return false;
+        }
+        // see what locations the atomic will write to
+        addr_t insn_memaddr = 0;
+        std::vector<addr_t> diff_addrs;
+        const ptx_instruction *pI;
+        for (unsigned thread = 0; thread < m_warp_size; thread++) {
+            if(active_mask[thread]) {
+                pI = (*(m_thread[warp_id*m_warp_size+thread])).func_info()->get_instruction((*(m_thread[warp_id*m_warp_size+thread])).get_pc());
+                find_atomic_address(pI, m_thread[warp_id*m_warp_size+thread]);
+                insn_memaddr = (*(m_thread[warp_id*m_warp_size+thread])).last_eaddr();
+                printf("shader id: %u, warp id: %u, thd in warp: %u, pc=%u, address: %u\n", m_sid, warp_id, thread, (*(m_thread[warp_id*m_warp_size+thread])).get_pc(), insn_memaddr);
+                //if(pI->get_atomic() == 393){ // make sure this is ATOMIC_ADD
+                    // add the atomic memory locations to diff_addrs vector, num_different is size of diff_addrs vector
+                    bool different;
+                    for (int i = 0; i < 1; i++) { // change to size of entries
+                        different = true;
+                        if(m_warp[warp_id].m_extended_buffer->address_list[i] == insn_memaddr){
+                            different = false;
+                            break;
+                        } 
+                    }
+                    if (different){
+                        if ( std::find(diff_addrs.begin(), diff_addrs.end(), insn_memaddr) != diff_addrs.end() ){
+                            // found non-matching address in diff_addr vector already
+                        }
+                        else {
+                            diff_addrs.push_back(insn_memaddr);
+                        }
+                    }
+                //}
+            }
+        }
+        // see if there's enough space in the buffer
+        if(m_warp[warp_id].extended_buffer_locations_remaining() < diff_addrs.size()){
+            m_warp[warp_id].set_extended_buffer_full_stall(); // newly added
+            return false; // not enough space
+        }
+        printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), m_warp[warp_id].extended_buffer_locations_remaining());
+        printf("####################### END ISSUE_WARP #######################\n\n");
+    }
 
     m_warp[warp_id].ibuffer_free();
     assert(next_inst->valid());
     **pipe_reg = *next_inst; // static instruction information
     (*pipe_reg)->issue( active_mask, warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, m_warp[warp_id].get_dynamic_warp_id(), sch_id ); // dynamic instruction information
     m_stats->shader_cycle_distro[2+(*pipe_reg)->active_count()]++;
-    func_exec_inst( **pipe_reg );
+    func_exec_inst( **pipe_reg, warp_id, active_mask );
     if( next_inst->op == BARRIER_OP ){
         m_warp[warp_id].store_info_of_last_inst_at_barrier(*pipe_reg);
         m_barriers.warp_reaches_barrier(m_warp[warp_id].get_cta_id(),warp_id,const_cast<warp_inst_t*> (next_inst));
@@ -871,8 +1161,11 @@ void shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
     }
 
     updateSIMTStack(warp_id,*pipe_reg);
-    m_scoreboard->reserveRegisters(*pipe_reg);
+    if(!(next_inst->op==ATOMIC_OP || next_inst->isatomic())){ // yikes
+        m_scoreboard->reserveRegisters(*pipe_reg);
+    }
     m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
+    return true;
 }
 
 void shader_core_ctx::issue(){
@@ -1040,13 +1333,14 @@ void scheduler_unit::cycle()
                         const active_mask_t &active_mask = m_simt_stack[warp_id]->get_active_mask();
                         assert( warp(warp_id).inst_in_pipeline() );
 
-                        if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP)||(pI->op==TENSOR_CORE_LOAD_OP)||(pI->op==TENSOR_CORE_STORE_OP) ) {
+                        if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP)||(pI->op==TENSOR_CORE_LOAD_OP)||(pI->op==TENSOR_CORE_STORE_OP) || (pI->op==ATOMIC_OP)) {
                         	if( m_mem_out->has_free(m_shader->m_config->sub_core_model, m_id) && (!diff_exec_units || previous_issued_inst_exec_type != exec_unit_type_t::MEM)) {
-                                m_shader->issue_warp(*m_mem_out,pI,active_mask,warp_id,m_id);
-                                issued++;
-                                issued_inst=true;
-                                warp_inst_issued = true;
-                                previous_issued_inst_exec_type = exec_unit_type_t::MEM;
+                                if(m_shader->issue_warp(*m_mem_out,pI,active_mask,warp_id,m_id)){
+                                    issued++;
+                                    issued_inst=true;
+                                    warp_inst_issued = true;
+                                    previous_issued_inst_exec_type = exec_unit_type_t::MEM;
+                                }
                             }
                         } else {
 
@@ -1097,43 +1391,48 @@ void scheduler_unit::cycle()
 									}
 
 									if(execute_on_SP) {
-										m_shader->issue_warp(*m_sp_out,pI,active_mask,warp_id,m_id);
-										issued++;
-										issued_inst=true;
-										warp_inst_issued = true;
-										previous_issued_inst_exec_type = exec_unit_type_t::SP;
+										if(m_shader->issue_warp(*m_sp_out,pI,active_mask,warp_id,m_id)){
+                                            issued++;
+                                            issued_inst=true;
+                                            warp_inst_issued = true;
+                                            previous_issued_inst_exec_type = exec_unit_type_t::SP;
+                                        }
 									} else if (execute_on_INT) {
-										m_shader->issue_warp(*m_int_out,pI,active_mask,warp_id,m_id);
-										issued++;
-										issued_inst=true;
-										warp_inst_issued = true;
-										previous_issued_inst_exec_type = exec_unit_type_t::INT;
+										if(m_shader->issue_warp(*m_int_out,pI,active_mask,warp_id,m_id)){
+                                            issued++;
+                                            issued_inst=true;
+                                            warp_inst_issued = true;
+                                            previous_issued_inst_exec_type = exec_unit_type_t::INT;
+                                        }
                                    }
                             } else if ( (m_shader->m_config->gpgpu_num_dp_units > 0) && (pI->op == DP_OP) && !(diff_exec_units && previous_issued_inst_exec_type == exec_unit_type_t::DP)) {
                                 if( dp_pipe_avail ) {
-                                    m_shader->issue_warp(*m_dp_out,pI,active_mask,warp_id,m_id);
-                                    issued++;
-                                    issued_inst=true;
-                                    warp_inst_issued = true;
-                                    previous_issued_inst_exec_type = exec_unit_type_t::DP;
+                                    if(m_shader->issue_warp(*m_dp_out,pI,active_mask,warp_id,m_id)){
+                                        issued++;
+                                        issued_inst=true;
+                                        warp_inst_issued = true;
+                                        previous_issued_inst_exec_type = exec_unit_type_t::DP;
+                                    }
                                 }
                             }  //If the DP units = 0 (like in Fermi archi), then execute DP inst on SFU unit
                             else if ( ((m_shader->m_config->gpgpu_num_dp_units == 0 && pI->op == DP_OP) || (pI->op == SFU_OP) || (pI->op == ALU_SFU_OP)) && !(diff_exec_units && previous_issued_inst_exec_type == exec_unit_type_t::SFU)) {
                                 if( sfu_pipe_avail ) {
-                                    m_shader->issue_warp(*m_sfu_out,pI,active_mask,warp_id,m_id);
-                                    issued++;
-                                    issued_inst=true;
-                                    warp_inst_issued = true;
-                                    previous_issued_inst_exec_type = exec_unit_type_t::SFU;
+                                    if(m_shader->issue_warp(*m_sfu_out,pI,active_mask,warp_id,m_id)){
+                                        issued++;
+                                        issued_inst=true;
+                                        warp_inst_issued = true;
+                                        previous_issued_inst_exec_type = exec_unit_type_t::SFU;
+                                    }
                                 }
                             }                         
                              else if ( (pI->op == TENSOR_CORE_OP) && !(diff_exec_units && previous_issued_inst_exec_type == exec_unit_type_t::SP) ) {
                                 if( tensor_core_pipe_avail ) {
-                                    m_shader->issue_warp(*m_tensor_core_out,pI,active_mask,warp_id,m_id);
-                                    issued++;
-                                    issued_inst=true;
-                                    warp_inst_issued = true;
-                                    previous_issued_inst_exec_type = exec_unit_type_t::TENSOR;
+                                    if(m_shader->issue_warp(*m_tensor_core_out,pI,active_mask,warp_id,m_id)){
+                                        issued++;
+                                        issued_inst=true;
+                                        warp_inst_issued = true;
+                                        previous_issued_inst_exec_type = exec_unit_type_t::TENSOR;
+                                    }
                                 }
 			    }
                          }//end of else
@@ -1517,6 +1816,31 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst)
   inst.completed(gpu_tot_sim_cycle + gpu_sim_cycle);
 }
 
+void shader_core_ctx::warp_inst_complete_no_ptx(const warp_inst_t &inst)
+{
+
+  #if 0
+      printf("[warp_inst_complete] uid=%u core=%u warp=%u pc=%#x @ time=%llu issued@%llu\n",
+             inst.get_uid(), m_sid, inst.warp_id(), inst.pc, gpu_tot_sim_cycle + gpu_sim_cycle, inst.get_issue_cycle());
+  #endif
+
+  if(inst.op_pipe==SP__OP)
+	  m_stats->m_num_sp_committed[m_sid]++;
+  else if(inst.op_pipe==SFU__OP)
+	  m_stats->m_num_sfu_committed[m_sid]++;
+  else if(inst.op_pipe==MEM__OP)
+	  m_stats->m_num_mem_committed[m_sid]++;
+
+  if(m_config->gpgpu_clock_gated_lanes==false)
+	  m_stats->m_num_sim_insn[m_sid] += m_config->warp_size;
+  else
+	  m_stats->m_num_sim_insn[m_sid] += inst.active_count();
+
+  m_stats->m_num_sim_winsn[m_sid]++;
+  m_gpu->gpu_sim_insn += inst.active_count();
+  //inst.completed(gpu_tot_sim_cycle + gpu_sim_cycle);
+}
+
 void shader_core_ctx::writeback()
 {
 
@@ -1784,6 +2108,10 @@ bool ldst_unit::memory_cycle( warp_inst_t &inst, mem_stage_stall_type &stall_rea
        return true;
    if( inst.active_count() == 0 ) 
        return true;
+    if( inst.accessq_empty() ){ // tommy added this to avoid the assert
+        printf("memory_cycle assert skipped\n");
+        return true;
+    }
    assert( !inst.accessq_empty() );
    mem_stage_stall_type stall_cond = NO_RC_FAIL;
    const mem_access_t &access = inst.accessq_back();
@@ -1804,14 +2132,21 @@ bool ldst_unit::memory_cycle( warp_inst_t &inst, mem_stage_stall_type &stall_rea
        if( m_icnt->full(size, inst.is_store() || inst.isatomic()) ) {
            stall_cond = ICNT_RC_FAIL;
        } else {
-           mem_fetch *mf = m_mf_allocator->alloc(inst,access);
-           m_icnt->push(mf);
+           //mem_fetch *mf = m_mf_allocator->alloc(inst,access); revert this back probably
+           //m_icnt->push(mf);
            inst.accessq_pop_back();
            //inst.clear_active( access.get_warp_mask() );
            if( inst.is_load() ) { 
-              for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
-                  if(inst.out[r] > 0) 
+              if(inst.op == ATOMIC_OP) { // lovely hard coded reg number to get instruction count to match up, also hardcoded in ldst issue
+                  for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
+                    if(666 > 0) 
+                      assert( m_pending_writes[inst.warp_id()][666] > 0 );
+              }
+              else {
+                  for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
+                    if(inst.out[r] > 0) 
                       assert( m_pending_writes[inst.warp_id()][inst.out[r]] > 0 );
+              }
            } else if( inst.is_store() ) 
               m_core->inc_store_req( inst.warp_id() );
        }
@@ -2151,20 +2486,34 @@ ldst_unit::ldst_unit( mem_fetch_interface *icnt,
           tpc );
 }
 
-void ldst_unit:: issue( register_set &reg_set )
+void ldst_unit::issue( register_set &reg_set )
 {
 	warp_inst_t* inst = *(reg_set.get_ready());
 
    // record how many pending register writes/memory accesses there are for this instruction
    assert(inst->empty() == false);
    if (inst->is_load() and inst->space.get_type() != shared_space) {
-      unsigned warp_id = inst->warp_id();
-      unsigned n_accesses = inst->accessq_count();
-      for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
-         unsigned reg_id = inst->out[r];
-         if (reg_id > 0) {
-            m_pending_writes[warp_id][reg_id] += n_accesses;
-         }
+      if (inst->op == ATOMIC_OP){
+        printf("Cycle: %d, Atomic inst at ldst_unit::issue, skip adding pending writes as extended buffer flush will do it\n", gpu_sim_cycle);
+        unsigned warp_id = inst->warp_id();
+        unsigned n_accesses = inst->accessq_count();
+        unsigned int regs[8] = {666,0,0,0,0,0,0,0};
+        for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
+            unsigned reg_id = regs[r]; // atomics should only have 1 out reg
+            if (reg_id > 0) {
+                m_pending_writes[warp_id][reg_id] += n_accesses;
+            }
+        }
+      }
+      else {
+        unsigned warp_id = inst->warp_id();
+        unsigned n_accesses = inst->accessq_count();
+        for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
+            unsigned reg_id = inst->out[r];
+            if (reg_id > 0) {
+                m_pending_writes[warp_id][reg_id] += n_accesses;
+            }
+        }
       }
    }
 
@@ -2175,31 +2524,52 @@ void ldst_unit:: issue( register_set &reg_set )
 	m_core->incmem_stat(m_core->get_config()->warp_size,1);
 	pipelined_simd_unit::issue(reg_set);
 }
-
+extern gpgpu_sim* g_the_gpu; 
 void ldst_unit::writeback()
 {
     // process next instruction that is going to writeback
     if( !m_next_wb.empty() ) {
         if( m_operand_collector->writeback(m_next_wb) ) {
             bool insn_completed = false; 
-            for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++ ) {
-                if( m_next_wb.out[r] > 0 ) {
-                    if( m_next_wb.space.get_type() != shared_space ) {
-                        assert( m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]] > 0 );
-                        unsigned still_pending = --m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]];
-                        if( !still_pending ) {
-                            m_pending_writes[m_next_wb.warp_id()].erase(m_next_wb.out[r]);
+            if( m_next_wb.op == ATOMIC_OP ){
+                if(g_the_gpu->m_extended_buffer_flush_reqs > 0){
+                    --g_the_gpu->m_extended_buffer_flush_reqs;
+                    insn_completed = true;
+                    //flush individual buffer slots here, modify clear slot function to set in use to false when all are clear
+                    new_addr_type addr = m_next_wb.m_per_scalar_thread[1].eb_rop_callback.addr;
+                    m_core->m_warp[m_next_wb.m_warp_id].extended_buffer_clear_slot(addr);
+                }
+                if(g_the_gpu->m_extended_buffer_flush_reqs == 0){
+                    m_pending_writes[m_next_wb.warp_id()].erase(m_next_wb.out[0]);
+                    m_scoreboard->releaseRegister( m_next_wb.warp_id(), m_next_wb.out[0] );
+                }
+            }
+            else {
+                for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++ ) {
+                    if( m_next_wb.out[r] > 0 ) {
+                        if( m_next_wb.space.get_type() != shared_space ) {
+                            assert( m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]] > 0 );
+                            unsigned still_pending = --m_pending_writes[m_next_wb.warp_id()][m_next_wb.out[r]];
+                            if( !still_pending ) {
+                                m_pending_writes[m_next_wb.warp_id()].erase(m_next_wb.out[r]);
+                                m_scoreboard->releaseRegister( m_next_wb.warp_id(), m_next_wb.out[r] );
+                                insn_completed = true; 
+                            }
+                        } else { // shared 
                             m_scoreboard->releaseRegister( m_next_wb.warp_id(), m_next_wb.out[r] );
                             insn_completed = true; 
                         }
-                    } else { // shared 
-                        m_scoreboard->releaseRegister( m_next_wb.warp_id(), m_next_wb.out[r] );
-                        insn_completed = true; 
                     }
                 }
             }
             if( insn_completed ) {
-                m_core->warp_inst_complete(m_next_wb);
+                if( m_next_wb.op == ATOMIC_OP ) {
+                    m_core->warp_inst_complete_no_ptx(m_next_wb);
+                }
+                else {
+                    m_core->warp_inst_complete(m_next_wb);
+                }
+                
             }
             m_next_wb.clear();
             m_last_inst_gpu_sim_cycle = gpu_sim_cycle;
@@ -3047,6 +3417,11 @@ void shader_core_ctx::cycle()
 		return;
 
 	m_stats->shader_cycles[m_sid]++;
+
+    if(check_extended_buffer_stall_all()){
+        //printf("All buffers that are in use are full, time to stall\n");
+    }
+
     writeback();
     execute();
     read_operands();
@@ -3805,6 +4180,22 @@ simt_core_cluster::simt_core_cluster( class gpgpu_sim *gpu,
 
 void simt_core_cluster::core_cycle()
 {
+    if(check_extended_buffer_stall()){
+        unsigned num_flushed = 0;
+        int flushed = 0;
+        //printf("All extended buffers in cluster are stalled\n");
+        for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ){
+            for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+                flushed = m_core[i]->extended_buffer_flush(warp_id);
+                num_flushed += flushed;
+                if(flushed){
+                    printf("All warps in cluster that are using the buffer are stalled, flushing core: %d, warp: %d, num_flushed: %d\n", i, warp_id, num_flushed);
+                }
+            }
+        }
+        g_the_gpu->m_extended_buffer_flush_reqs += num_flushed;
+    }
+    
     for( std::list<unsigned>::iterator it = m_core_sim_order.begin(); it != m_core_sim_order.end(); ++it ) {
         m_core[*it]->cycle();
     }
@@ -3865,6 +4256,47 @@ unsigned simt_core_cluster::get_n_active_sms() const
     for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ )
         n += m_core[i]->isactive();
     return n;
+}
+
+bool simt_core_cluster::check_extended_buffer_stall()
+{
+    bool is_stalled;
+    for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
+        is_stalled = m_core[i]->check_extended_buffer_stall_all();
+        if(is_stalled == false){
+            return false;
+        }
+    }
+    return true;
+}
+
+bool simt_core_cluster::check_everything_done_except_flush()
+{
+    bool done;
+    for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
+        done = m_core[i]->check_if_shaders_are_done();
+        if(done == false){
+            return false;
+        }
+    }
+    return true;
+}
+
+int simt_core_cluster::extended_buffer_flush_all()
+{
+    int num_flushed = 0;
+    int flushed;
+    //printf("Kernel is exiting, flush all remaining extended buffers\n");
+    for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ){
+        for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+            flushed = m_core[i]->extended_buffer_flush(warp_id);
+            num_flushed += flushed;
+            if(flushed){
+                printf("Flushing core: %d, warp: %d, num_flushed: %d\n", i, warp_id, num_flushed);
+            }
+        }
+    }
+    return num_flushed;
 }
 
 unsigned simt_core_cluster::issue_block2core()
@@ -4093,7 +4525,7 @@ void simt_core_cluster::get_L1T_sub_stats(struct cache_sub_stats &css) const{
 void shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned t, unsigned tid)
 {
     if(inst.isatomic())
-           m_warp[inst.warp_id()].inc_n_atomic();
+           //m_warp[inst.warp_id()].inc_n_atomic();
         if (inst.space.is_local() && (inst.is_load() || inst.is_store())) {
             new_addr_type localaddrs[MAX_ACCESSES_PER_INSN_PER_THREAD];
             unsigned num_addrs;
@@ -4116,4 +4548,3 @@ void shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned 
         }
     }
 }
-

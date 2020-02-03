@@ -94,6 +94,22 @@ public:
    bool m_active; 
 };
 
+class extended_buffer {
+public:
+    extended_buffer(){
+        for(int i = 0; i<32; i++){
+            address_list.push_back(0);
+            buffer.push_back(0);
+            flushed.push_back(false);
+        }
+    }
+    std::vector<new_addr_type> address_list;
+    //warp_inst_t* inst_list [8]; // also store the first inst ptr that uses the buffer as a proxy to generate the mem access and mem fetch
+    //std::vector<unsigned int*> buffer;
+    std::vector<float> buffer;
+    std::vector<bool> flushed;
+};
+
 class shd_warp_t {
 public:
     shd_warp_t( class shader_core_ctx *shader, unsigned warp_size) 
@@ -101,6 +117,22 @@ public:
     {
         m_stores_outstanding=0;
         m_inst_in_pipeline=0;
+        m_extended_buffer = NULL;
+        m_extended_buffer_full_stall = false;
+        m_extended_buffer_in_use = false;
+        m_extended_buffer_freshly_initialied = true;
+        //m_extended_buffer->in_use = false;
+        //m_extended_buffer->freshly_initialied = true;
+        /*for (int i = 0; i < extended_buffer_num_entries; i++){
+            m_extended_buffer->address_list.push_back((new_addr_type)0);
+            //m_extended_buffer->address_list[i] = 0;
+            //m_extended_buffer->buffer.push_back(new unsigned int[extended_buffer_buff_size]);
+            for (int j = 0; j < extended_buffer_buff_size; j++){
+                m_extended_buffer->buffer[i][j] = 0;
+            }
+            m_extended_buffer->buffer.push_back(0.0);
+        }*/
+
         reset(); 
     }
     void reset()
@@ -121,6 +153,19 @@ public:
         //Jin: cdp support
         m_cdp_latency = 0;
         m_cdp_dummy = false;
+
+        m_extended_buffer_full_stall = false;
+        m_extended_buffer_in_use = false;
+        m_extended_buffer_freshly_initialied = true;
+        /*for (int i = 0; i < extended_buffer_num_entries; i++){
+            m_extended_buffer->address_list[i] = 0; // if address list holds 0, means its not in use 
+            //m_extended_buffer.inst_list[i] = 0;
+            //for (int j = 0; j < extended_buffer_buff_size; j++){
+              //  m_extended_buffer->buffer[i][j] = 0;
+            //}
+            m_extended_buffer->buffer[i] = 0;
+            m_extended_buffer->flushed[i] = false;
+        }*/
     }
     void init( address_type start_pc,
                unsigned cta_id,
@@ -141,6 +186,19 @@ public:
         //Jin: cdp support
         m_cdp_latency = 0;
         m_cdp_dummy = false;
+
+        m_extended_buffer_full_stall = false;
+        m_extended_buffer_in_use = false;
+        m_extended_buffer_freshly_initialied = true;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            m_extended_buffer->address_list[i] = 0; // if address list holds 0, means its not in use 
+            //m_extended_buffer.inst_list[i] = 0;
+            /*for (int j = 0; j < extended_buffer_buff_size; j++){
+                m_extended_buffer->buffer[i][j] = 0;
+            }*/
+            m_extended_buffer->buffer[i] = 0;
+            m_extended_buffer->flushed[i] = false;
+        }
     }
 
     bool functional_done() const;
@@ -244,6 +302,449 @@ public:
     unsigned get_dynamic_warp_id() const { return m_dynamic_warp_id; }
     unsigned get_warp_id() const { return m_warp_id; }
 
+    bool get_extended_buffer_full_stall() { return m_extended_buffer_full_stall; }
+    void set_extended_buffer_full_stall() { m_extended_buffer_full_stall = true; }
+
+    mem_access_t extended_buffer_generate_mem_access_for_entry( int entry_idx ) {
+        mem_access_type access_type = GLOBAL_ACC_R;
+        new_addr_type addr = m_extended_buffer->address_list[entry_idx];
+        unsigned int size = 32; // in our case equals segment_size
+        bool is_write = false;
+        warp_inst_t::transaction_info info;
+        unsigned chunk = (addr&127)/32; // which 32-byte chunk within in a 128-byte chunk does this thread access?
+        unsigned thread = 1;
+        info.chunks.set(chunk);
+        info.active.set(thread);
+        unsigned idx = (addr&127);
+        unsigned int data_size = 4;
+        for( unsigned i=0; i < data_size; i++ ) {
+            //assert(!info.bytes.test(idx+i));
+            //info.bytes.set(idx+i);
+            info.bytes.set(i);
+        }
+        mem_access_t buffer_mem_access = mem_access_t(access_type,addr,size,is_write,info.active,info.bytes,info.chunks);
+        return buffer_mem_access;
+    }
+
+    bool extended_buffer_full() {
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if(m_extended_buffer->address_list[i] == 0){
+                return false;
+            }
+        }
+        return true;
+    }
+
+    int extended_buffer_locations_remaining() {
+        int count = 0;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if(m_extended_buffer->address_list[i] != 0){
+                count++;
+            }
+        }
+        return (extended_buffer_num_entries-count);
+    }
+
+    int extended_buffer_first_avail_slot(addr_t address) {
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->address_list[i] == address) {
+                return i;
+            }
+            if (m_extended_buffer->address_list[i] == 0) {
+                return i;
+            }
+        }
+        m_extended_buffer_full_stall = true;
+        return -1; // if nothing was available, then it will return -1
+    }
+
+    void extended_buffer_occupy_slot(addr_t address, warp_inst_t* inst) {
+        m_extended_buffer_freshly_initialied = false;
+        assert(address != 0);
+        int buffer_idx = extended_buffer_first_avail_slot(address);
+        if(buffer_idx == -1){
+            assert(buffer_idx != -1);
+            return;
+        }
+        m_extended_buffer_in_use = true;
+        m_extended_buffer->address_list[buffer_idx] = address;
+        //if(!m_extended_buffer.inst_list[buffer_idx]){ // stores the last inst that uses the buffer
+            //m_extended_buffer.inst_list[buffer_idx] = inst;
+        //}
+    }
+
+    void copy_most_recent_inst() { // should probably be called after generate_mem_access to get the most recent version
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            /*warp_inst_t old_inst = *(m_extended_buffer.inst_list[i]);
+            warp_inst_t* copy = new warp_inst_t();
+            *copy = old_inst.copy_inst();
+            m_extended_buffer.inst_list[i] = copy;*/
+        }
+    }
+
+    void extended_buffer_clear_slot_value(addr_t address){
+        //m_extended_buffer_full_stall = false;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->address_list[i] == address) {
+                //m_extended_buffer.inst_list[i] = 0;
+                /*for (int j = 0; j < extended_buffer_buff_size; j++){
+                    m_extended_buffer->buffer[i][j] = 0;
+                }*/
+                m_extended_buffer->buffer[i] = 0;
+            }
+        }
+    }
+
+    void extended_buffer_clear_slot(addr_t address) {
+        m_extended_buffer_full_stall = false;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->address_list[i] == address) {
+                m_extended_buffer->address_list[i] = 0;
+                //m_extended_buffer.inst_list[i] = 0;
+                /*for (int j = 0; j < extended_buffer_buff_size; j++){
+                    m_extended_buffer->buffer[i][j] = 0;
+                }*/
+                m_extended_buffer->buffer[i] = 0;
+                m_extended_buffer->flushed[i] = false;
+            }
+        }
+
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->address_list[i] == 0){
+                // checks if slot i is cleared
+            }
+            else {
+                return;
+            }
+        }
+        m_extended_buffer_in_use = 0;
+    }
+
+    void extended_buffer_clear_all() {
+        m_extended_buffer_full_stall = false;
+        m_extended_buffer_in_use = false;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            m_extended_buffer->address_list[i] = 0;
+            //m_extended_buffer.inst_list[i] = 0;
+            /*for (int j = 0; j < extended_buffer_buff_size; j++){
+                m_extended_buffer->buffer[i][j] = 0;
+            }*/
+            m_extended_buffer->buffer[i] = 0;
+        }
+    }
+
+    void extended_buffer_print_contents() {
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            printf("Slot %d, Addr: %llu, Buffer: ", i, m_extended_buffer->address_list[i]);
+            //print_buffer(m_extended_buffer->buffer[i]);
+            printf("%f\n", m_extended_buffer->buffer[i]);
+        }
+        printf("\n");
+    }
+
+    int extended_buffer_find_idx(addr_t address){
+        int buff_idx = -1;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->address_list[i] == address){
+                buff_idx = i;
+                break;
+            }
+        }
+        return buff_idx; // returns -1 if cant find address
+    }
+
+    /*float extended_buffer_convert_to_float(addr_t address){ // give the address and it will find which buffer it's in
+        return convert_to_float(m_extended_buffer->buffer[extended_buffer_find_idx(address)]);
+    }
+
+    float convert_to_float(unsigned int* buffer)
+    {
+        bool VERBOSE = true;
+        int FIRST = 0;
+        int LAST = 7;
+        unsigned int collange_float;
+        unsigned int* new_buff = new unsigned int[8];
+        bool neg = buffer[LAST] >> 31;
+        bool zeros = true;
+        fb fb_union;
+
+        for (int i = FIRST; i <= LAST; i++)
+        {
+            if (buffer[i] != 0)
+            {
+                zeros = false;
+                break;
+            }
+        }
+
+        if (zeros)
+        {
+            return 0;
+        }
+
+        if (neg)
+        {
+            // twos complement
+            for (int j = FIRST; j <= LAST; j++)
+            {
+                new_buff[j] = ~buffer[j];
+            }
+
+            int carry_i;
+            uint32_t temp_sum = new_buff[FIRST] + 1;
+            new_buff[FIRST] = temp_sum;
+            carry_i = FIRST + 1;
+
+            // propagate carry
+            while (carry_i <= LAST && temp_sum == 0)
+            {
+                temp_sum = new_buff[carry_i] + 1;
+                new_buff[carry_i] = temp_sum;
+                carry_i++;
+            }
+        }
+        else
+        {
+            // just copy buffer
+            for (int j = 0; j < 8; j++)
+            {
+                new_buff[j] = buffer[j];
+            }
+        }
+
+        int non_zero = LAST;
+
+        // find most significant non-zero word
+        while (new_buff[non_zero] == 0)
+        {
+            non_zero--;
+        }
+
+        int non_zero_bit = 31;
+
+        // find most significant non-zero bit
+        while ((new_buff[non_zero] >> non_zero_bit) == 0)
+        {
+            non_zero_bit--;
+        }
+        
+        // mantissa spans two words ("overflows" to adjecent word)
+        if (non_zero_bit < 23)
+        {
+            // get 2^(non_zero_bit + 1) - 1 (0x..fff)
+            unsigned int top_mask = (1 << (non_zero_bit + 1)) - 1;
+
+            // get number of overflow bits
+            unsigned int top_shift = 24 - (non_zero_bit + 1);
+
+            //  shift a 32-bit word until only overflow bits remaining
+            unsigned int bot_shift = 32 - top_shift;
+
+            unsigned int top = new_buff[non_zero] & top_mask;
+
+            unsigned int bottom = (non_zero == FIRST) ? 0 : new_buff[non_zero - 1] >> bot_shift;
+            
+            collange_float = (top << top_shift) | bottom;
+        }
+        else
+        {
+            // find end of mantissa and shift that bit to 0
+            unsigned int shift = non_zero_bit + 1 - 24; 
+            collange_float = new_buff[non_zero] >> shift;
+        }
+        collange_float = (neg ? 0x80000000 : 0x00000000) | ((((non_zero) << 5 | (non_zero_bit)) - 23 + 22) << 23) | (collange_float & 0x7fffff);
+        fb_union.b = collange_float;
+        delete new_buff;
+        return fb_union.f;
+    }
+
+    void print_buffer(unsigned int* buffer)
+    {
+        int FIRST = 0;
+        int LAST = 7;
+        for (int i = LAST; i >= FIRST; i--)
+        {
+            std::cout << std::hex << buffer[i] << " ";
+        }
+        std::cout << ", Float val: " << convert_to_float(buffer);
+        std::cout << std::endl;
+    }
+    
+    void extended_buffer_fp32_add(addr_t address, float input_num) {
+        bool VERBOSE = true;
+        int FIRST = 0;
+        int LAST = 7;
+        int buffer_idx = extended_buffer_find_idx(address);
+
+        if(buffer_idx == -1){
+            printf("Address: %llu not found in buffer, nothing was added\n", address);
+            return;
+        }
+
+        unsigned int* buffer = m_extended_buffer->buffer[buffer_idx];
+        unsigned int g_hits[8] = {0};
+        unsigned int g_carry_only[8] = {0};
+        unsigned int num;
+        bool neg;
+        unsigned char e;
+        int m;
+        int word_num;
+        int shift;
+
+        word w;
+
+        fb actual_f;
+        fb float_byte;
+        fb collange_float;
+        double actual_d;
+
+        bool prev_neg;
+        int g_sign_switch = 0;
+        int sign_switch;
+
+        int g_bits_dropped = 0;
+        int bits_dropped;
+
+        float_byte.f = input_num;
+        num = float_byte.b;
+        actual_f.f += float_byte.f;
+        actual_d += (double) float_byte.f;
+
+        unsigned int hits[8] = {0};
+        unsigned int carry_only[8] = {0};
+
+        actual_f.b = 0;
+        actual_d = 0;
+
+        prev_neg = false;
+        sign_switch = 0;
+        bits_dropped = 0;
+        
+        neg = num >> 31;
+        e = num >> 23 & 0xff;
+        m = (num == 0) ? 0 : (num & 0x7fffff | 0x800000);
+
+        shift = (num == 0) ? 0 : ((e - 22) & 0x1f);
+        word_num = (num == 0) ? 0 : (e - 22) >> 5;
+
+        w.w = ((int64_t) m) << shift;
+
+        if (VERBOSE)
+        {
+            std::cout << "ADD " << std::hex << num << "-> ";
+            std::cout << "m: " << m << " e: 0x" << (unsigned int) e << " (" << "Shift: " << std::dec << shift << ")" << std::endl;
+            std::cout << std::hex << "word " << word_num << ": " << w.hw.bot;
+            std::cout << " word " << word_num + 1 << ": " << w.hw.top << std::endl;
+        }
+
+        uint32_t temp_sum;
+        bool carry = false;
+
+        g_hits[word_num]++;
+        hits[word_num]++;
+            
+        if (w.hw.top != 0)
+        {
+            g_hits[word_num+1]++;
+            hits[word_num+1]++;
+        }
+
+        int word_i;
+        for (word_i = word_num; word_i < word_num + 2; word_i++)
+        {
+            uint32_t val = (word_i == word_num) ? w.hw.bot : w.hw.top;
+            if (word_i <= LAST && word_i >= FIRST)
+            {
+                if (neg)
+                {
+                    temp_sum = buffer[word_i] - val - (carry ? 1 : 0);
+                    carry = (temp_sum > buffer[word_i]);
+                }
+                else
+                {
+                    temp_sum = buffer[word_i] + val + (carry ? 1 : 0);
+                    carry = (temp_sum < buffer[word_i]);
+                }
+                buffer[word_i] = temp_sum;
+            }
+            else
+            {
+                if (word_i == word_num)
+                {
+                    bits_dropped += ((32 - shift) > 0) ? (32 - shift) : 0;
+                    g_bits_dropped += ((32 - shift) > 0) ? (32 - shift) : 0;
+                }
+                else
+                {
+                    bits_dropped += (shift >= 32) ? 24 : shift;
+                    g_bits_dropped += (shift >= 32) ? 24 : shift;
+                }
+                
+            }
+            
+        }
+
+        while (word_i <= LAST && carry)
+        {
+            g_carry_only[word_i]++;
+            carry_only[word_i]++;
+            if (neg)
+            {
+                carry = (buffer[word_i] == 0);
+                buffer[word_i]--;
+            }
+            else
+            {
+                buffer[word_i]++;
+                carry = (buffer[word_i] == 0);
+            }
+            word_i++;
+        }
+        
+        if ((buffer[LAST] >> 31) != prev_neg)
+        {
+            sign_switch++;
+            g_sign_switch++;
+        }
+        prev_neg = buffer[LAST] >> 31;
+
+        if (VERBOSE)
+        {
+            collange_float.b = convert_to_float(buffer);
+            print_buffer(buffer);
+            std::cout << convert_to_float(buffer) << " " << actual_f.b << " " << fabs(collange_float.f - actual_f.f) << std::endl << std::endl;
+        }
+    }*/
+    void extended_buffer_fp32_add(addr_t address, float input_num) {
+        int buffer_idx = extended_buffer_find_idx(address);
+
+        if(buffer_idx == -1){
+            printf("Address: %llu not found in buffer, nothing was added\n", address);
+            return;
+        }
+        m_extended_buffer->buffer[buffer_idx] += input_num;
+    }
+
+    float extended_buffer_get_value(addr_t address) {
+        int buffer_idx = extended_buffer_find_idx(address);
+
+        if(buffer_idx == -1){
+            printf("Address: %llu not found in buffer, nothing was added\n", address);
+            return 0;
+        }
+        return m_extended_buffer->buffer[buffer_idx];
+    }
+
+    void extended_buffer_set_flushed(addr_t address) {
+        int buffer_idx = extended_buffer_find_idx(address);
+
+        if(buffer_idx == -1){
+            printf("Address: %llu not found in buffer, nothing was added\n", address);
+            return;
+        }
+        m_extended_buffer->flushed[buffer_idx] = true;
+    }
+
 private:
     static const unsigned IBUFFER_SIZE=2;
     class shader_core_ctx *m_shader;
@@ -279,9 +780,35 @@ private:
     unsigned m_inst_in_pipeline;
 
     //Jin: cdp support
+    struct halfword
+    {
+        uint32_t bot;
+        uint32_t top;
+    };
+
+    union word
+    {
+        uint64_t w;
+        halfword  hw;
+    };
+
+    union fb
+    {
+        float f;
+        unsigned int b;
+    };
+
 public:
     unsigned int m_cdp_latency;
     bool m_cdp_dummy;
+
+    extended_buffer *m_extended_buffer;
+    bool m_extended_buffer_full_stall;
+    bool m_extended_buffer_in_use;
+    bool m_extended_buffer_freshly_initialied;
+
+    static const unsigned extended_buffer_num_entries=32; // how many addresses we can store
+    static const unsigned extended_buffer_buff_size=8; // how long the buffer is
 };
 
 
@@ -1195,6 +1722,7 @@ public:
         case TENSOR_CORE_LOAD_OP: return false;
         case STORE_OP: return false;
         case TENSOR_CORE_STORE_OP: return false;
+        case ATOMIC_OP: return false;
         case MEMORY_BARRIER_OP: return false;
         case DP_OP: return false;
         default: break;
@@ -1241,6 +1769,7 @@ public:
         case TENSOR_CORE_LOAD_OP: break;
         case STORE_OP: break;
         case TENSOR_CORE_STORE_OP: break;
+        case ATOMIC_OP: break;
         case MEMORY_BARRIER_OP: break;
         default: return false;
         }
@@ -1259,6 +1788,10 @@ public:
     void get_L1C_sub_stats(struct cache_sub_stats &css) const;
     void get_L1T_sub_stats(struct cache_sub_stats &css) const;
 
+    shader_core_mem_fetch_allocator* get_mf_allocator() { return m_mf_allocator; }
+    mem_fetch_interface* get_icnt() { return m_icnt; }
+    std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,unsigned/*count*/> > m_pending_writes;
+    
 protected:
     ldst_unit( mem_fetch_interface *icnt,
                shader_core_mem_fetch_allocator *mf_allocator,
@@ -1281,7 +1814,7 @@ protected:
                shader_core_stats *stats,
                unsigned sid,
                unsigned tpc );
-
+    class shader_core_ctx *m_core; // for ease of flush
 protected:
    bool shared_cycle( warp_inst_t &inst, mem_stage_stall_type &rc_fail, mem_stage_access_type &fail_type);
    bool constant_cycle( warp_inst_t &inst, mem_stage_stall_type &rc_fail, mem_stage_access_type &fail_type);
@@ -1300,14 +1833,14 @@ protected:
    const memory_config *m_memory_config;
    class mem_fetch_interface *m_icnt;
    shader_core_mem_fetch_allocator *m_mf_allocator;
-   class shader_core_ctx *m_core;
+   //class shader_core_ctx *m_core;
    unsigned m_sid;
    unsigned m_tpc;
 
    tex_cache *m_L1T; // texture cache
    read_only_cache *m_L1C; // constant cache
    l1_cache *m_L1D; // data cache
-   std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,unsigned/*count*/> > m_pending_writes;
+   //std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,unsigned/*count*/> > m_pending_writes;
    std::list<mem_fetch*> m_response_fifo;
    opndcoll_rfu_t *m_operand_collector;
    Scoreboard *m_scoreboard;
@@ -1821,6 +2354,7 @@ public:
     bool warp_waiting_at_mem_barrier( unsigned warp_id );
     void set_max_cta( const kernel_info_t &kernel );
     void warp_inst_complete(const warp_inst_t &inst);
+    void warp_inst_complete_no_ptx(const warp_inst_t &inst);
     
     // accessors
     std::list<unsigned> get_regs_written( const inst_t &fvt ) const;
@@ -1943,6 +2477,43 @@ public:
 	 void inc_simt_to_mem(unsigned n_flits){ m_stats->n_simt_to_mem[m_sid] += n_flits; }
 	 bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
 
+     int extended_buffer_flush( unsigned warpId );
+     bool check_extended_buffer_stall_all() { // checks if all warps in the sm are stalled from extended buffer
+         for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+             if (m_warp[warp_id].m_extended_buffer_in_use) {
+                if( m_warp[warp_id].get_extended_buffer_full_stall() || (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()) ) { // case where it is a stall
+
+                }
+                else {
+                    return false;
+                }
+             }
+
+             /*if(m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){
+
+             }
+             else {
+                return false;
+             }*/
+         }
+         return true;
+     }
+
+     bool check_if_shaders_are_done() { // checks if all warps in the sm are stalled from extended buffer
+         for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+             //if(m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){
+             if(m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id)){
+
+             }
+             else {
+                return false;
+             }
+         }
+         return true;
+     }
+
+    std::vector<shd_warp_t>   m_warp;   // per warp information array
+
 	private:
 	 unsigned inactive_lanes_accesses_sfu(unsigned active_count,double latency){
       return  ( ((32-active_count)>>1)*latency) + ( ((32-active_count)>>3)*latency) + ( ((32-active_count)>>3)*latency);
@@ -1964,8 +2535,9 @@ public:
     friend class scheduler_unit; //this is needed to use private issue warp.
     friend class TwoLevelScheduler;
     friend class LooseRoundRobbinScheduler;
-    void issue_warp( register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id, unsigned sch_id );
-    void func_exec_inst( warp_inst_t &inst );
+    bool issue_warp( register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id, unsigned sch_id );
+    void func_exec_inst( warp_inst_t &inst , unsigned warpId, const active_mask_t &active_mask);
+    void core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, const active_mask_t &active_mask, unsigned warpId =(unsigned)-1); // for atomic adds
 
      // Returns numbers of addresses in translated_addrs
     unsigned translate_local_memaddr( address_type localaddr, unsigned tid, unsigned num_shader, unsigned datasize, new_addr_type* translated_addrs );
@@ -2010,7 +2582,7 @@ public:
     int  m_last_warp_fetched;
 
     // decode/dispatch
-    std::vector<shd_warp_t>   m_warp;   // per warp information array
+    //std::vector<shd_warp_t>   m_warp;   // per warp information array
     barrier_set_t             m_barriers;
     ifetch_buffer_t           m_inst_fetch_buffer;
     std::vector<register_set> m_pipeline_reg;
@@ -2108,13 +2680,18 @@ public:
     void get_icnt_stats(long &n_simt_to_mem, long &n_mem_to_simt) const;
     float get_current_occupancy( unsigned long long& active, unsigned long long & total ) const;
 
+    bool check_extended_buffer_stall();
+    bool check_everything_done_except_flush();
+    int extended_buffer_flush_all();
+    shader_core_ctx **m_core; // easier to implement buffer
+    const shader_core_config *m_config; // easier to implement buffer
 private:
     unsigned m_cluster_id;
     gpgpu_sim *m_gpu;
-    const shader_core_config *m_config;
+    //const shader_core_config *m_config;
     shader_core_stats *m_stats;
     memory_stats_t *m_memory_stats;
-    shader_core_ctx **m_core;
+    //shader_core_ctx **m_core;
 
     unsigned m_cta_issue_next_core;
     std::list<unsigned> m_core_sim_order;

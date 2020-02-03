@@ -1003,6 +1003,12 @@ public:
       return m_operands[2];
    }
 
+   void set_src2(float val) 
+   { 
+      assert( m_operands.size() > 2 );
+      m_operands[2] = operand_info(val);
+   }
+
    const operand_info &src3() const 
    { 
       assert( m_operands.size() > 3 );
@@ -1330,7 +1336,7 @@ public:
    {
       return m_return_var_sym;
    }
-   const ptx_instruction *get_instruction( unsigned PC ) const
+   ptx_instruction *get_instruction( unsigned PC ) const
    {
       unsigned index = PC - m_start_PC;
       if( index < m_instr_mem_size ) 

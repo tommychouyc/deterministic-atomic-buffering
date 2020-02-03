@@ -74,7 +74,7 @@ void *gpgpu_sim_thread_sequential(void*)
       if( g_the_gpu->get_more_cta_left() ) {
           done = false;
           g_the_gpu->init();
-          while( g_the_gpu->active() ) {
+          while( g_the_gpu->really_active() ) {
               g_the_gpu->cycle();
               g_the_gpu->deadlock_check();
           }
@@ -132,7 +132,7 @@ void *gpgpu_sim_thread_concurrent(void*)
             // another kernel, the gpu is not re-initialized and the inter-kernel
             // behaviour may be incorrect. Check that a kernel has finished and
             // no other kernel is currently running.
-            if(g_stream_manager->operation(&sim_cycles) && !g_the_gpu->active())
+            if(!g_the_gpu->really_active() && g_stream_manager->operation(&sim_cycles)) // swap back later maybe
                 break;
 
             //functional simulation
@@ -144,7 +144,7 @@ void *gpgpu_sim_thread_concurrent(void*)
             }
 
             //performance simulation
-            if( g_the_gpu->active() ) {
+            if( g_the_gpu->really_active() ) {
                 g_the_gpu->cycle();
                 sim_cycles = true;
                 g_the_gpu->deadlock_check();
@@ -156,7 +156,7 @@ void *gpgpu_sim_thread_concurrent(void*)
                 }
             }
 
-            active=g_the_gpu->active() || !g_stream_manager->empty_protected();
+            active=g_the_gpu->really_active() || !g_stream_manager->empty_protected();
 
         } while( active && !g_sim_done);
         if(g_debug_execution >= 3) {

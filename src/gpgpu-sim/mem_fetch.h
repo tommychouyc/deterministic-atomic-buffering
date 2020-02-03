@@ -73,6 +73,7 @@ public:
        }
    }
    void do_atomic();
+   void do_eb_rop();
 
    void print( FILE *fp, bool print_inst = true ) const;
 

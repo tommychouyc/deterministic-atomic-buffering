@@ -1397,7 +1397,7 @@ void atom_callback( const inst_t* inst, ptx_thread_info* thread)
    // Write operation result into  memory
    // (i.e. copy src1_data to dst)
    if ( data_ready ) {
-      mem->write(effective_address,size/8,&op_result.s64,thread,pI);
+      mem->write(effective_address,size/8,&op_result.s64,thread,pI); // blocking out the write from the actual atomic and use the buffer writes instead
    } else {
       printf("Execution error: data_ready not set\n");
       assert(0);

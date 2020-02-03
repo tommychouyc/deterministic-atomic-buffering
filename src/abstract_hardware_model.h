@@ -96,7 +96,8 @@ enum uarch_op_t {
    BARRIER_OP,
    MEMORY_BARRIER_OP,
    CALL_OPS,
-   RET_OPS
+   RET_OPS,
+   ATOMIC_OP
 };
 typedef enum uarch_op_t op_type;
 
@@ -850,6 +851,17 @@ struct dram_callback_t {
    class ptx_thread_info *thread;
 };
 
+struct eb_rop_callback_t {
+   eb_rop_callback_t() { reset(); }
+   void reset() { function=NULL; instruction=NULL; thread=NULL; addr=0; buffer_value=0xDEADBEEF;}
+   typedef void (*eb_rop_callback_function_t)(const class inst_t* instruction, class ptx_thread_info* thread, new_addr_type addr, float buffer_value);
+   eb_rop_callback_function_t function;
+   const class inst_t* instruction;
+   class ptx_thread_info *thread;
+   new_addr_type addr; 
+   float buffer_value; 
+};
+
 class inst_t {
 public:
     inst_t()
@@ -887,7 +899,7 @@ public:
     {
         fprintf(fp," [inst @ pc=0x%04x] ", pc );
     }
-    bool is_load() const { return (op == LOAD_OP ||op==TENSOR_CORE_LOAD_OP || memory_op == memory_load); }
+    bool is_load() const { return (op == LOAD_OP ||op==TENSOR_CORE_LOAD_OP || memory_op == memory_load || op == ATOMIC_OP); }
     bool is_store() const { return (op == STORE_OP ||op==TENSOR_CORE_STORE_OP || memory_op == memory_store); }
     unsigned get_num_operands() const {return num_operands;}
     unsigned get_num_regs() const {return num_regs;}
@@ -970,13 +982,60 @@ public:
         m_is_printf=false;
         m_is_cdp = 0;
     }
+    /*warp_inst_t( const warp_inst_t& orig ){
+        printf("copy constructor\n");
+        m_uid = orig.m_uid;
+        m_empty = orig.m_empty;
+        m_cache_hit = orig.m_cache_hit;
+        issue_cycle = orig.issue_cycle;
+        cycles = orig.cycles; // used for implementing initiation interval delay
+        m_isatomic = orig.m_isatomic;
+        m_is_printf = orig.m_is_printf;
+        m_warp_id = orig.m_warp_id;
+        m_dynamic_warp_id = orig.m_dynamic_warp_id; 
+        m_config = orig.m_config; 
+        m_warp_active_mask = orig.m_warp_active_mask; // dynamic active mask for timing model (after predication)
+        m_warp_issued_mask = orig.m_warp_issued_mask; // active mask at issue (prior to predication test) -- for instruction counting
+        m_per_scalar_thread_valid = orig.m_per_scalar_thread_valid;
+        m_per_scalar_thread = orig.m_per_scalar_thread;
+        m_mem_accesses_created = orig.m_mem_accesses_created;
+        m_accessq = orig.m_accessq;
+        sm_next_uid = orig.sm_next_uid;
+        m_scheduler_id = orig.m_scheduler_id;  //the scheduler that issues this inst
+        m_is_cdp = orig.m_is_cdp;
+    }*/
     virtual ~warp_inst_t(){
+    }
+
+    warp_inst_t copy_inst (){
+        warp_inst_t copy;
+        copy.m_uid = m_uid;
+        copy.m_empty = m_empty;
+        copy.m_cache_hit = m_cache_hit;
+        copy.issue_cycle = issue_cycle;
+        copy.cycles = cycles; // used for implementing initiation interval delay
+        copy.m_isatomic = m_isatomic;
+        copy.m_is_printf = m_is_printf;
+        copy.m_warp_id = m_warp_id;
+        copy.m_dynamic_warp_id = m_dynamic_warp_id; 
+        copy.m_config = m_config; 
+        copy.m_warp_active_mask = m_warp_active_mask; // dynamic active mask for timing model (after predication)
+        copy.m_warp_issued_mask = m_warp_issued_mask; // active mask at issue (prior to predication test) -- for instruction counting
+        copy.m_per_scalar_thread_valid = m_per_scalar_thread_valid;
+        copy.m_per_scalar_thread = m_per_scalar_thread;
+        copy.m_mem_accesses_created = m_mem_accesses_created;
+        copy.m_accessq = m_accessq;
+        copy.sm_next_uid = sm_next_uid;
+        copy.m_scheduler_id = m_scheduler_id;  //the scheduler that issues this inst
+        copy.m_is_cdp = m_is_cdp;
+        return copy;
     }
 
     // modifiers
     void broadcast_barrier_reduction( const active_mask_t& access_mask);
     void do_atomic(bool forceDo=false);
     void do_atomic( const active_mask_t& access_mask, bool forceDo=false );
+    void do_eb_rop( const active_mask_t& access_mask, bool forceDo=false);
     void clear() 
     { 
         m_empty=true; 
@@ -999,6 +1058,27 @@ public:
     	return m_warp_active_mask;
     }
     void completed( unsigned long long cycle ) const;  // stat collection: called when the instruction is completed  
+
+    void set_cache_op(cache_operator_type type) { cache_op = type; }
+    void set_op(uarch_op_t type) { op = type; }
+    void set_space(_memory_space_t type) { space.set_type(type); }
+    void set_data_size(unsigned int size) { data_size = size; }
+    void set_m_warp_id(unsigned int warp_id) { m_warp_id = warp_id; }
+    void set_memory_op(_memory_op_t type) { memory_op = type; }
+    void set_out(unsigned int num) {
+         out[0] = num;
+         for (int i=1; i<8; i++){
+             out[i] = 0;
+         }
+    }
+    void set_outcount(int num) { outcount = num; }
+    void set_in() {
+         for (int i=0; i<24; i++){
+             in[i] = 0;
+         }
+    }
+    void set_incount(int num) { incount = num; }
+    void set_oprnd_type(uarch_operand_type_t type) { oprnd_type = type; }
 
     void set_addr( unsigned n, new_addr_type addr ) 
     {
@@ -1044,6 +1124,7 @@ public:
     };
 
     void generate_mem_accesses();
+    void generate_extended_buffer_mem_accesses();
     void memory_coalescing_arch( bool is_write, mem_access_type access_type );
     void memory_coalescing_arch_atomic( bool is_write, mem_access_type access_type );
     void memory_coalescing_arch_reduce_and_send( bool is_write, mem_access_type access_type, const transaction_info &info, new_addr_type addr, unsigned segment_size );
@@ -1063,6 +1144,43 @@ public:
         m_per_scalar_thread[lane_id].callback.instruction = inst;
         m_per_scalar_thread[lane_id].callback.thread = thread;
     }
+
+    void add_atomic_without_callback( unsigned lane_id, 
+                       void (*function)(const class inst_t*, class ptx_thread_info*),
+                       const inst_t *inst, 
+                       class ptx_thread_info *thread,
+                       bool atomic)
+    {
+        if( !m_per_scalar_thread_valid ) {
+            m_per_scalar_thread.resize(m_config->warp_size);
+            m_per_scalar_thread_valid=true;
+            if(atomic) m_isatomic=true;
+        }
+        m_per_scalar_thread[lane_id].callback.function = function;
+        m_per_scalar_thread[lane_id].callback.instruction = inst;
+        m_per_scalar_thread[lane_id].callback.thread = thread;
+    }
+
+    void add_eb_rop_callback( unsigned lane_id, 
+                       eb_rop_callback_t::eb_rop_callback_function_t function,
+                       const inst_t *inst, 
+                       class ptx_thread_info *thread,
+                       bool atomic,
+                       float buffer_value,
+                       unsigned long long addr)
+    {
+        if( !m_per_scalar_thread_valid ) {
+            m_per_scalar_thread.resize(m_config->warp_size);
+            m_per_scalar_thread_valid=true;
+        }
+        m_isatomic=true; //ZZZZ:HACK
+        m_per_scalar_thread[lane_id].eb_rop_callback.function = function;
+        m_per_scalar_thread[lane_id].eb_rop_callback.instruction = inst;
+        m_per_scalar_thread[lane_id].eb_rop_callback.thread = thread;
+        m_per_scalar_thread[lane_id].eb_rop_callback.buffer_value = buffer_value;
+        m_per_scalar_thread[lane_id].eb_rop_callback.addr = addr;
+    }
+
     void set_active( const active_mask_t &active );
 
     void clear_active( const active_mask_t &inactive );
@@ -1138,7 +1256,7 @@ protected:
     unsigned cycles; // used for implementing initiation interval delay
     bool m_isatomic;
     bool m_is_printf;
-    unsigned m_warp_id;
+    //unsigned m_warp_id;
     unsigned m_dynamic_warp_id; 
     const core_config *m_config; 
     active_mask_t m_warp_active_mask; // dynamic active mask for timing model (after predication)
@@ -1150,10 +1268,11 @@ protected:
                 memreqaddr[i] = 0;
         }
         dram_callback_t callback;
+        eb_rop_callback_t eb_rop_callback;
         new_addr_type memreqaddr[MAX_ACCESSES_PER_INSN_PER_THREAD]; // effective address, upto 8 different requests (to support 32B access in 8 chunks of 4B each)
     };
     bool m_per_scalar_thread_valid;
-    std::vector<per_thread_info> m_per_scalar_thread;
+    //std::vector<per_thread_info> m_per_scalar_thread;
     bool m_mem_accesses_created;
     std::list<mem_access_t> m_accessq;
 
@@ -1164,7 +1283,8 @@ protected:
     //Jin: cdp support
 public:
     int m_is_cdp;
-    
+    unsigned m_warp_id;
+    std::vector<per_thread_info> m_per_scalar_thread;
 };
 
 void move_warp( warp_inst_t *&dst, warp_inst_t *&src );

@@ -114,6 +114,11 @@ void mem_fetch::do_atomic()
     m_inst.do_atomic( m_access.get_warp_mask() );
 }
 
+void mem_fetch::do_eb_rop()
+{
+	m_inst.do_eb_rop( m_access.get_warp_mask() );
+}
+
 bool mem_fetch::istexture() const
 {
     if( m_inst.empty() ) return false;
