@@ -907,7 +907,7 @@ void buffer_flush_atomic_callback( const inst_t* inst, ptx_thread_info* thread, 
 int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for m_extended_buffer_full_stall except for the final kernel end flush
 {
     if(!(m_warp[warpId].m_extended_buffer_in_use)){
-        return 0;
+        return -1;
     }
     assert(m_warp[warpId].m_extended_buffer_in_use);
 
@@ -4180,21 +4180,24 @@ simt_core_cluster::simt_core_cluster( class gpgpu_sim *gpu,
 
 void simt_core_cluster::core_cycle()
 {
-    if(check_extended_buffer_stall()){
-        unsigned num_flushed = 0;
+    // flushes 1 cluster per cycle
+    /*if(check_extended_buffer_stall()){ 
+        int num_flushed = 0;
         int flushed = 0;
         //printf("All extended buffers in cluster are stalled\n");
         for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ){
             for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
                 flushed = m_core[i]->extended_buffer_flush(warp_id);
-                num_flushed += flushed;
-                if(flushed){
+                if(flushed > 0){
                     printf("All warps in cluster that are using the buffer are stalled, flushing core: %d, warp: %d, num_flushed: %d\n", i, warp_id, num_flushed);
+                    num_flushed += flushed;
                 }
             }
         }
-        g_the_gpu->m_extended_buffer_flush_reqs += num_flushed;
-    }
+        if(num_flushed >= 0){
+            g_the_gpu->m_extended_buffer_flush_reqs += num_flushed;
+        }
+    }*/
     
     for( std::list<unsigned>::iterator it = m_core_sim_order.begin(); it != m_core_sim_order.end(); ++it ) {
         m_core[*it]->cycle();

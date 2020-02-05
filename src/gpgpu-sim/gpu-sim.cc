@@ -775,7 +775,17 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    m_functional_sim = false;
    m_functional_sim_kernel = NULL;
 
+   // for kernel exit flush
+   flushing_counter = 0;
    cluster_to_flush = 0;
+   core_to_flush = 0;
+   warp_to_flush = 0;
+
+   // for buffer stall flush
+   flushing_counter_for_stall = 0;
+   cluster_to_flush_for_stall = 0;
+   core_to_flush_for_stall = 0;
+   warp_to_flush_for_stall = 0;
    m_extended_buffer_flush_reqs = 0;
 }
 
@@ -1804,7 +1814,84 @@ void gpgpu_sim::cycle()
          m_cluster[i]->extended_buffer_flush_all();
       }*/
 
-      unsigned num_flushed = 0;
+      
+
+      //////////////////////// Buffer Stall Flush ////////////////////////
+      int num_flushed_from_stall = 0;
+      int flushed_from_stall = 0;
+      bool buffer_stalled;
+      for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
+         if(m_cluster[i]->check_extended_buffer_stall()){
+            
+         }
+         else {
+            buffer_stalled = false;
+            break;
+         }
+         buffer_stalled = true;
+      }
+
+      // flushing 1 cluster per cycle
+      /*if(buffer_stalled){ 
+         //printf("All extended buffers in cluster are stalled\n");
+         for( unsigned i=0; i < m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster; i++ ){
+            for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+               flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[i]->extended_buffer_flush(warp_id);
+               flushing_counter_for_stall++;
+               if(flushed_from_stall > 0){
+                  printf("Cycle: %u, All warps in cluster that are using the buffer are stalled, Flushing cluster: %d, core: %d, warp: %d, buffers_flushed: %d, total flushed: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, i, warp_id, flushed_from_stall, num_flushed_from_stall);
+                  num_flushed_from_stall += flushed_from_stall;
+               }
+            }
+         }
+      }*/
+
+      // flushing 1 warp per cycle
+      if(buffer_stalled){
+         while(flushing_counter_for_stall < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
+            flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush(warp_to_flush_for_stall);
+            flushing_counter_for_stall++;
+            warp_to_flush_for_stall++;
+            warp_to_flush_for_stall = warp_to_flush_for_stall % MAX_WARP_PER_SHADER;
+
+            if(flushed_from_stall > 0) {
+               num_flushed_from_stall += flushed_from_stall;
+               break;
+            }
+
+            core_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / MAX_WARP_PER_SHADER)) % (m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster);
+            cluster_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / (m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * MAX_WARP_PER_SHADER))) % (m_shader_config->n_simt_clusters);
+
+            /*if(flushed_from_stall == -1) {
+               //printf("Cycle: %u, Stalled, Not in use, cluster: %d, core: %d, warp: %d, buffers_flushed: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, warp_to_flush_for_stall, flushed_from_stall);
+               flushing_counter_for_stall++;
+               warp_to_flush_for_stall++;
+               warp_to_flush_for_stall = warp_to_flush_for_stall % MAX_WARP_PER_SHADER;
+               break;
+            }
+
+            if(flushed_from_stall > 0){
+               printf("Cycle: %u, Stalled, Flushing cluster: %d, core: %d, warp: %d, buffers_flushed: %d, total flushed: %u\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, warp_to_flush_for_stall, flushed_from_stall, num_flushed_from_stall);
+               num_flushed_from_stall += flushed_from_stall;
+               flushing_counter_for_stall++;
+               warp_to_flush_for_stall++;
+               warp_to_flush_for_stall = warp_to_flush_for_stall % MAX_WARP_PER_SHADER;
+               break;
+            }*/
+         }
+      }
+
+      core_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / MAX_WARP_PER_SHADER)) % (m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster);
+      cluster_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / (m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * MAX_WARP_PER_SHADER))) % (m_shader_config->n_simt_clusters);
+
+      flushing_counter_for_stall = flushing_counter_for_stall % (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
+
+      if(num_flushed_from_stall >= 0){
+         m_extended_buffer_flush_reqs += num_flushed_from_stall;
+      }
+
+      //////////////////////// Kernel Exit Flush ////////////////////////
+      int num_flushed = 0;
       int flushed = 0;
       bool done;
       for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
@@ -1818,24 +1905,67 @@ void gpgpu_sim::cycle()
          done = true;
       }
 
-      if(done){ // check if everythings done, flush 1 cluster per cycle, do i need to check if m_extended_buffer_flush_reqs == 0?
+      // flushing 1 cluster per cycle
+      /*if(done){ // check if everythings done, flush 1 cluster per cycle, do i need to check if m_extended_buffer_flush_reqs == 0?
          printf("Cycle: %d, Kernel Exit Flush\n", gpu_sim_cycle);
          for( unsigned i=0; i < m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster; i++ ){
             for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
                flushed = m_cluster[cluster_to_flush]->m_core[i]->extended_buffer_flush(warp_id);
-               num_flushed += flushed;
-               if(flushed){
+               flushing_counter++;
+               if(flushed > 0){
                   printf("Flushing cluster: %d, core: %d, warp: %d, buffers_flushed: %d, total flushed: %u\n", cluster_to_flush, i, warp_id, flushed, num_flushed);
+                  num_flushed += flushed;
                }
             }
          }
-      }
-      if (num_flushed) {
-         cluster_to_flush++;
-         cluster_to_flush = cluster_to_flush % (m_shader_config->n_simt_clusters);
-      }
-      m_extended_buffer_flush_reqs += num_flushed;
+      }*/
 
+      // flush 1 warp per cycle
+      if(done){ // check if everythings done, flush 1 cluster per cycle, do i need to check if m_extended_buffer_flush_reqs == 0?
+         while(flushing_counter < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
+            flushed = m_cluster[cluster_to_flush]->m_core[core_to_flush]->extended_buffer_flush(warp_to_flush);
+            flushing_counter++;
+            warp_to_flush++;
+            warp_to_flush = warp_to_flush % MAX_WARP_PER_SHADER;
+
+            if(flushed > 0){
+               num_flushed += flushed;
+               break;
+            }
+
+            core_to_flush = (int)(floor(flushing_counter / MAX_WARP_PER_SHADER)) % (m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster);
+            cluster_to_flush = (int)(floor(flushing_counter / (m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * MAX_WARP_PER_SHADER))) % (m_shader_config->n_simt_clusters);
+            
+            /*if(flushed == -1) {
+               printf("Cycle: %u, Kernel exit, Not in use, cluster: %d, core: %d, warp: %d, buffers_flushed: %d\n", gpu_sim_cycle, cluster_to_flush, core_to_flush, warp_to_flush, flushed);
+               flushing_counter++;
+               warp_to_flush++;
+               warp_to_flush = warp_to_flush % MAX_WARP_PER_SHADER;
+               break;
+            }
+
+            if(flushed > 0){
+               printf("Cycle: %u, Kernel exit, Flushing cluster: %d, core: %d, warp: %d, buffers_flushed: %d, total flushed: %u\n", gpu_sim_cycle, cluster_to_flush, core_to_flush, warp_to_flush, flushed, num_flushed);
+               num_flushed += flushed;
+               flushing_counter++;
+               warp_to_flush++;
+               warp_to_flush = warp_to_flush % MAX_WARP_PER_SHADER;
+               break;
+            }*/
+         }
+         printf("m_extended_buffer_flush_reqs: %d, num_flushed: %d\n", m_extended_buffer_flush_reqs, num_flushed);
+      }
+
+      //increment cluster and core id
+      core_to_flush = (int)(floor(flushing_counter / MAX_WARP_PER_SHADER)) % (m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster);
+      cluster_to_flush = (int)(floor(flushing_counter / (m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * MAX_WARP_PER_SHADER))) % (m_shader_config->n_simt_clusters);
+
+      flushing_counter = flushing_counter % (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
+
+      if(num_flushed >= 0){
+         m_extended_buffer_flush_reqs += num_flushed;
+      }
+      
 #if (CUDART_VERSION >= 5000)
       //launch device kernel
       launch_one_device_kernel();
