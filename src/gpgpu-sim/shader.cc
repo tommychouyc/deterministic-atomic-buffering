@@ -909,12 +909,18 @@ int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for
     if(!(m_warp[warpId].m_extended_buffer_in_use)){
         return -1;
     }
-    assert(m_warp[warpId].m_extended_buffer_in_use);
 
-    if(m_icnt->full(32,true)){
-        printf("interconnect full when trying to flush extended buffer\n");
+    int count = 0;
+    for( int i = 0; i < m_warp[warpId].extended_buffer_num_entries; i++){ // find how many will be pushed to interconnect
+        if(m_warp[warpId].m_extended_buffer->address_list[i] != 0 && !m_warp[warpId].m_extended_buffer->flushed[i]){
+            count++;
+        }
+    }
+    if(m_icnt->full(32,true)){ // used to be just 32
+        printf("Warp: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", warpId, count);
         return 0;
     }
+    
     int slots_flushed = 0;
     printf("@@@@@@@@@@@ In extended_buffer_flush @@@@@@@@@@@\n");
     for( int i = 0; i < m_warp[warpId].extended_buffer_num_entries; i++){ // only generate mf for the entries that are in use, aka addr != 0
@@ -941,18 +947,18 @@ int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for
             // active mask shoud be only 1 bit since the bits of the mask determine which threads perform their callback, 
             // so i only need 1 thread in the warp to perform 1 callback since i only have 1 buffer value
             active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
-            for( unsigned i=0; i < m_config->warp_size; i++ ){
-                if( active_mask.test(i) ){
+            for( unsigned j=0; j < m_config->warp_size; j++ ){
+                if( active_mask.test(j) ){
                     //new_addr_type t_addr = addr + 4*i; // dont need t_addr
-                    inst->set_addr((unsigned)i,addr); // can get address from the already created mem_access
+                    inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
                     unsigned warp_id = warpId;
                     // unique hardware warp id across the entire GPU
                     unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
 
                     // Add callback to the inst to perform the flush atomic
                     //inst->add_eb_rop_callback(i, buffer_flush_atomic_callback, inst, NULL, true, m_warp[warpId].extended_buffer_convert_to_float(addr), addr);
-                    inst->add_eb_rop_callback(i, buffer_flush_atomic_callback, inst, NULL, true, m_warp[warpId].extended_buffer_get_value(addr), addr);
-                    printf("addr: %u, val: %f\n", addr, m_warp[warpId].extended_buffer_get_value(addr));
+                    inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, m_warp[warpId].extended_buffer_get_value(addr), addr);
+                    //printf("Warp: %d, Flush %d: addr: %u, val: %f\n",warpId ,i , addr, m_warp[warpId].extended_buffer_get_value(addr));
                 }
             }
 
@@ -960,6 +966,7 @@ int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for
             inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[0]->get_schd_id()); // is the schd_id correct?
 		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
 		    m_icnt->push(mf);
+            printf("Warp: %d, Flush %d: addr: %u, val: %f\n",warpId ,i , addr, m_warp[warpId].extended_buffer_get_value(addr));
 
             // TODO: maybe increment some logs
             //inc_store_req( warpId );
@@ -971,7 +978,10 @@ int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for
             slots_flushed++;
         }
     }
-    //m_warp[warpId].extended_buffer_clear_all();
+
+    if(slots_flushed == 0){
+        printf("Warp: %d, Nothing flushed\n", warpId);
+    }
     return slots_flushed;
 }
 
@@ -2564,7 +2574,7 @@ void ldst_unit::writeback()
             }
             if( insn_completed ) {
                 if( m_next_wb.op == ATOMIC_OP ) {
-                    m_core->warp_inst_complete_no_ptx(m_next_wb);
+                    //m_core->warp_inst_complete_no_ptx(m_next_wb);
                 }
                 else {
                     m_core->warp_inst_complete(m_next_wb);
