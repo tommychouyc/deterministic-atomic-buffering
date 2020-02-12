@@ -841,6 +841,7 @@ enum scheduler_prioritization_type
 enum concrete_scheduler
 {
     CONCRETE_SCHEDULER_LRR = 0,
+    CONCRETE_SCHEDULER_SRR,
     CONCRETE_SCHEDULER_GTO,
     CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE,
     CONCRETE_SCHEDULER_WARP_LIMITING,
@@ -875,7 +876,7 @@ public:
     // The core scheduler cycle method is meant to be common between
     // all the derived schedulers.  The scheduler's behaviour can be
     // modified by changing the contents of the m_next_cycle_prioritized_warps list.
-    void cycle();
+    bool cycle();
 
     // These are some common ordering fucntions that the
     // higher order schedulers can take advantage of
@@ -943,6 +944,26 @@ protected:
     register_set* m_mem_out;
 
     int m_id;
+};
+
+class srr_scheduler : public scheduler_unit {
+public:
+	srr_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+                    Scoreboard* scoreboard, simt_stack** simt,
+                    std::vector<shd_warp_t>* warp,
+                    register_set* sp_out,
+					register_set* dp_out,
+                    register_set* sfu_out,
+					register_set* int_out,
+                    register_set* tensor_core_out,
+                    register_set* mem_out,
+                    int id )
+	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id ){}
+	virtual ~srr_scheduler () {}
+	virtual void order_warps ();
+    virtual void done_adding_supervised_warps() {
+        m_last_supervised_issued = m_supervised_warps.end();
+    }
 };
 
 class lrr_scheduler : public scheduler_unit {
@@ -2481,7 +2502,7 @@ public:
      bool check_extended_buffer_stall_all() { // checks if all warps in the sm are stalled from extended buffer
          for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
              if (m_warp[warp_id].m_extended_buffer_in_use) {
-                if( m_warp[warp_id].get_extended_buffer_full_stall() || (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()) ) { // case where it is a stall
+                if( m_warp[warp_id].get_extended_buffer_full_stall() || (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()) || m_warp[warp_id].functional_done() ) { // case where it is a stall
 
                 }
                 else {

@@ -152,13 +152,30 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
 					 sched_config.find("old") != std::string::npos ?
 					 CONCRETE_SCHEDULER_OLDEST_FIRST :
                                          sched_config.find("warp_limiting") != std::string::npos ?
-                                         CONCRETE_SCHEDULER_WARP_LIMITING:
+                                         CONCRETE_SCHEDULER_WARP_LIMITING: sched_config.find("srr") != std::string::npos ? CONCRETE_SCHEDULER_SRR :
                                          NUM_CONCRETE_SCHEDULERS;
     assert ( scheduler != NUM_CONCRETE_SCHEDULERS );
     
     for (int i = 0; i < m_config->gpgpu_num_sched_per_core; i++) {
         switch( scheduler )
         {
+            case CONCRETE_SCHEDULER_SRR:
+                schedulers.push_back(
+                    new srr_scheduler( m_stats,
+                                       this,
+                                       m_scoreboard,
+                                       m_simt_stack,
+                                       &m_warp,
+                                       &m_pipeline_reg[ID_OC_SP],
+									   &m_pipeline_reg[ID_OC_DP],
+                                       &m_pipeline_reg[ID_OC_SFU],
+									   &m_pipeline_reg[ID_OC_INT],
+                                       &m_pipeline_reg[ID_OC_TENSOR_CORE],
+                                       &m_pipeline_reg[ID_OC_MEM],
+                                       i
+                                     )
+                );
+                break;
             case CONCRETE_SCHEDULER_LRR:
                 schedulers.push_back(
                     new lrr_scheduler( m_stats,
@@ -916,13 +933,19 @@ int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for
             count++;
         }
     }
-    if(m_icnt->full(32,true)){ // used to be just 32
-        printf("Warp: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", warpId, count);
+
+    if (count == 0){
+        printf("Warp: %d, Nothing to flush\n", warpId);
         return 0;
+    }
+
+    if(m_icnt->full(40*count,true)){ // used to be just 32, 40 is flit size
+        printf("Warp: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", warpId, count);
+        return -2;
     }
     
     int slots_flushed = 0;
-    printf("@@@@@@@@@@@ In extended_buffer_flush @@@@@@@@@@@\n");
+    printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d @@@@@@@@@@@\n", count);
     for( int i = 0; i < m_warp[warpId].extended_buffer_num_entries; i++){ // only generate mf for the entries that are in use, aka addr != 0
         new_addr_type addr = m_warp[warpId].m_extended_buffer->address_list[i];
         if (addr != 0 && !m_warp[warpId].m_extended_buffer->flushed[i]){
@@ -1027,14 +1050,14 @@ void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, con
                         src2_data = thread->get_operand_value(src2, src1, to_type, thread, 1);     // b
                     }
                     float insn_operand = src2_data.f32;
-                    printf("Executing atomic_add for warp: %u thread: %u, tid: %u, addr: %llu, val: %f\n", warpId, t, tid, insn_memaddr, insn_operand);
+                    //printf("Executing atomic_add for warp: %u thread: %u, tid: %u, addr: %llu, val: %f\n", warpId, t, tid, insn_memaddr, insn_operand);
 
                     // find which buffer slot to write to and occupy the slot by writing to the address list
-                    printf("===============================core_execute_warp_inst_t_atomic_add===============================\n");
+                    //printf("===============================core_execute_warp_inst_t_atomic_add===============================\n");
                     //const ptx_instruction *pI = (*(m_thread[tid])).func_info()->get_instruction((*(m_thread[tid])).get_pc());
                     m_warp[warpId].extended_buffer_occupy_slot(insn_memaddr, &inst);
                     m_warp[warpId].extended_buffer_fp32_add(insn_memaddr, insn_operand);
-                    m_warp[warpId].extended_buffer_print_contents();
+                    //m_warp[warpId].extended_buffer_print_contents();
                     
                     // mark the instruction as complete?
                     //float extended_buffer_val = m_warp[warpId].extended_buffer_convert_to_float(insn_memaddr);
@@ -1042,7 +1065,7 @@ void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, con
                     m_thread[tid]->ptx_exec_inst_atomic_add_only(inst,t,extended_buffer_val,true); // i think this advances the pc and stuff
 
                     //m_thread[tid]->ptx_exec_inst(inst,t); // replace this with buffer add
-                    printf("####################### END core_execute_warp_inst_t_atomic_add #######################\n");
+                    //printf("####################### END core_execute_warp_inst_t_atomic_add #######################\n");
                 }
             }
             else{
@@ -1107,13 +1130,10 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
 
     if(next_inst->op==ATOMIC_OP || next_inst->isatomic()){
         // check buffer to see if full or not
-        printf("####################### ISSUE_WARP #######################\n");
-        printf("Cycle: %d, warp id: %u, m_thread: %u, buff locations remaining: %d, buff full: %d, full stall: %d\n", gpu_sim_cycle, warp_id, m_thread, m_warp[warp_id].extended_buffer_locations_remaining(), m_warp[warp_id].extended_buffer_full(), m_warp[warp_id].get_extended_buffer_full_stall());
+        //printf("####################### ISSUE_WARP #######################\n");
+        //printf("Cycle: %d, warp id: %u, m_thread: %u, buff locations remaining: %d, buff full: %d, full stall: %d\n", gpu_sim_cycle, warp_id, m_thread, m_warp[warp_id].extended_buffer_locations_remaining(), m_warp[warp_id].extended_buffer_full(), m_warp[warp_id].get_extended_buffer_full_stall());
         if(m_warp[warp_id].extended_buffer_full()){
             m_warp[warp_id].set_extended_buffer_full_stall();
-            // flush the buffer here
-            //extended_buffer_flush(warp_id);
-            //m_warp[warp_id].extended_buffer_clear_all();
             return false;
         }
         // see what locations the atomic will write to
@@ -1125,7 +1145,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
                 pI = (*(m_thread[warp_id*m_warp_size+thread])).func_info()->get_instruction((*(m_thread[warp_id*m_warp_size+thread])).get_pc());
                 find_atomic_address(pI, m_thread[warp_id*m_warp_size+thread]);
                 insn_memaddr = (*(m_thread[warp_id*m_warp_size+thread])).last_eaddr();
-                printf("shader id: %u, warp id: %u, thd in warp: %u, pc=%u, address: %u\n", m_sid, warp_id, thread, (*(m_thread[warp_id*m_warp_size+thread])).get_pc(), insn_memaddr);
+                //printf("shader id: %u, warp id: %u, thd in warp: %u, pc=%u, address: %u\n", m_sid, warp_id, thread, (*(m_thread[warp_id*m_warp_size+thread])).get_pc(), insn_memaddr);
                 //if(pI->get_atomic() == 393){ // make sure this is ATOMIC_ADD
                     // add the atomic memory locations to diff_addrs vector, num_different is size of diff_addrs vector
                     bool different;
@@ -1152,8 +1172,8 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             m_warp[warp_id].set_extended_buffer_full_stall(); // newly added
             return false; // not enough space
         }
-        printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), m_warp[warp_id].extended_buffer_locations_remaining());
-        printf("####################### END ISSUE_WARP #######################\n\n");
+        //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), m_warp[warp_id].extended_buffer_locations_remaining());
+        //printf("####################### END ISSUE_WARP #######################\n\n");
     }
 
     m_warp[warp_id].ibuffer_free();
@@ -1179,7 +1199,131 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
 }
 
 void shader_core_ctx::issue(){
+    
+    std::string sched_config = m_config->gpgpu_scheduler_string;
+    bool srr = sched_config.find("srr") != std::string::npos;
 
+    
+    if (srr)
+    {
+        int ways = 0;
+
+        // could move this to constructor and make it a field to speed up this part
+        if (sched_config.find("srr4") != std::string::npos)
+        {
+            //4-way, non-blocking
+            unsigned j;
+            for (unsigned i = 0; i < schedulers.size(); i++)
+            {
+	            j = (Issue_Prio + i) % schedulers.size();
+	            schedulers[j]->cycle();
+            }
+
+            // ensures fair round robin scheduling for schedulers
+            Issue_Prio = (Issue_Prio+1)% schedulers.size();
+        }
+        else if (sched_config.find("srr1") != std::string::npos)
+        {
+            // 1-way, blocking
+            unsigned j;
+            for (unsigned i = 0; i < schedulers.size(); i++) 
+            {
+	            j = (Issue_Prio + i) % schedulers.size();
+
+                // if nothing can be issued, try again next cycle, 
+                // but do not try to issue from any schedulers after
+                if (!schedulers[j]->cycle())
+                {
+                    Issue_Prio = j;
+                    return;
+                }
+            }
+        }
+        // assumes 4 schedulers
+        else if (sched_config.find("2") != std::string::npos)
+        {
+            int sched_pairs[2][2];
+            if (sched_config.find("01") != std::string::npos)
+            {
+                // {{0, 1}, {2, 3}}
+                sched_pairs[0][0] = 0;
+                sched_pairs[0][1] = 1;
+                sched_pairs[1][0] = 2;
+                sched_pairs[1][1] = 3;
+
+            }
+            else if (sched_config.find("02") != std::string::npos)
+            {
+                // {{0, 2}, {1, 3}}
+                sched_pairs[0][0] = 0;
+                sched_pairs[0][1] = 2;
+                sched_pairs[1][0] = 1;
+                sched_pairs[1][1] = 3;
+            }
+            else
+            {
+                assert(false && "Invalid scheduler configurations for strict round robin. Accepted configurations: srr4, srr1, srr2_01, srr2_02");
+            }
+
+            // don't want to introduce too many new fields, reuse Issue_Prio to keep track of:
+            // which pair of schedulers is next, where scheduler within the pairs are next
+            // since everything has 2 choices, encode as binary
+
+            int first_sched       = (Issue_Prio >> 2) & 0x1;
+            int first_pair_next   = (Issue_Prio >> 1) & 0x1;
+            int sec_pair_next     =  Issue_Prio       & 0x1;
+
+            int first_sched_next  = first_sched ? first_pair_next : sec_pair_next;
+            int sec_sched_next    = first_sched ? sec_pair_next   : first_pair_next;
+
+
+            // unroll for clarity
+            for (int i = 0; i < 2; i++)
+            {
+                int sched_selected = sched_pairs[first_sched][(first_sched_next + i)%2];
+                if (!schedulers[sched_selected]->cycle())
+                {
+                    // keep track of last issued scheduler
+                    if (first_sched)
+                    {
+                        first_pair_next = (first_sched_next + i)%2;
+                    }
+                    else
+                    {
+                        sec_pair_next = (first_sched_next + i)%2;
+                    }
+                    
+                    break;
+                }
+            }
+            for (int i = 0; i < 2; i++)
+            {
+                int sched_selected = sched_pairs[(first_sched + 1)%2][(sec_sched_next + i)%2];
+                if (!schedulers[sched_selected]->cycle())
+                {
+                    // keep track of last issued scheduler
+                    if (first_sched)
+                    {
+                        sec_pair_next = (sec_sched_next + i)%2;
+                    }
+                    else
+                    {
+                        first_pair_next = (sec_sched_next + i)%2;
+                    }
+
+                    break;
+                }
+            }
+
+            // construct Issue_Prior for next cycle
+            Issue_Prio = (((first_sched + 1)%2) << 2) | (first_pair_next << 1) | (sec_pair_next);
+        }
+        else
+        {
+            assert(false && "Invalid scheduler configurations for strict round robin. Accepted configurations: srr4, srr1, srr2_01, srr2_02");
+        }
+     }
+    else{
      //Ensure fair round robin issu between schedulers 
      unsigned j;
      for (unsigned i = 0; i < schedulers.size(); i++) {
@@ -1192,6 +1336,7 @@ void shader_core_ctx::issue(){
     //for (unsigned i = 0; i < schedulers.size(); i++) {
     //    schedulers[i]->cycle();
     //}
+    }
 }
 
 shd_warp_t& scheduler_unit::warp(int i){
@@ -1286,12 +1431,15 @@ void scheduler_unit::order_by_priority( std::vector< T >& result_list,
     }
 }
 
-void scheduler_unit::cycle()
+bool scheduler_unit::cycle()
 {
     SCHED_DPRINTF( "scheduler_unit::cycle()\n" );
     bool valid_inst = false;  // there was one warp with a valid instruction to issue (didn't require flush due to control hazard)
     bool ready_inst = false;  // of the valid instructions, there was one not waiting for pending register writes
     bool issued_inst = false; // of these we issued one
+
+    bool no_active_warps = true;
+    bool issue_warp_didnt_issue = false;
 
     order_warps();
     for ( std::vector< shd_warp_t* >::const_iterator iter = m_next_cycle_prioritized_warps.begin();
@@ -1301,6 +1449,8 @@ void scheduler_unit::cycle()
         if ( (*iter) == NULL || (*iter)->done_exit() ) {
             continue;
         }
+        no_active_warps = false;
+        //issue_warp_didnt_issue = true;
         SCHED_DPRINTF( "Testing (warp_id %u, dynamic_warp_id %u)\n",
                        (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
         unsigned warp_id = (*iter)->get_warp_id();
@@ -1350,6 +1500,10 @@ void scheduler_unit::cycle()
                                     issued_inst=true;
                                     warp_inst_issued = true;
                                     previous_issued_inst_exec_type = exec_unit_type_t::MEM;
+                                    issue_warp_didnt_issue = false;
+                                }
+                                else {
+                                    issue_warp_didnt_issue = true;
                                 }
                             }
                         } else {
@@ -1406,6 +1560,7 @@ void scheduler_unit::cycle()
                                             issued_inst=true;
                                             warp_inst_issued = true;
                                             previous_issued_inst_exec_type = exec_unit_type_t::SP;
+                                            //issue_warp_didnt_issue = false;
                                         }
 									} else if (execute_on_INT) {
 										if(m_shader->issue_warp(*m_int_out,pI,active_mask,warp_id,m_id)){
@@ -1413,6 +1568,7 @@ void scheduler_unit::cycle()
                                             issued_inst=true;
                                             warp_inst_issued = true;
                                             previous_issued_inst_exec_type = exec_unit_type_t::INT;
+                                            //issue_warp_didnt_issue = false;
                                         }
                                    }
                             } else if ( (m_shader->m_config->gpgpu_num_dp_units > 0) && (pI->op == DP_OP) && !(diff_exec_units && previous_issued_inst_exec_type == exec_unit_type_t::DP)) {
@@ -1422,6 +1578,7 @@ void scheduler_unit::cycle()
                                         issued_inst=true;
                                         warp_inst_issued = true;
                                         previous_issued_inst_exec_type = exec_unit_type_t::DP;
+                                        //issue_warp_didnt_issue = false;
                                     }
                                 }
                             }  //If the DP units = 0 (like in Fermi archi), then execute DP inst on SFU unit
@@ -1432,6 +1589,7 @@ void scheduler_unit::cycle()
                                         issued_inst=true;
                                         warp_inst_issued = true;
                                         previous_issued_inst_exec_type = exec_unit_type_t::SFU;
+                                        //issue_warp_didnt_issue = false;
                                     }
                                 }
                             }                         
@@ -1442,6 +1600,7 @@ void scheduler_unit::cycle()
                                         issued_inst=true;
                                         warp_inst_issued = true;
                                         previous_issued_inst_exec_type = exec_unit_type_t::TENSOR;
+                                        //issue_warp_didnt_issue = false;
                                     }
                                 }
 			    }
@@ -1500,6 +1659,8 @@ void scheduler_unit::cycle()
         m_stats->shader_cycle_distro[1]++; // waiting for RAW hazards (possibly due to memory) 
     else if( !issued_inst ) 
         m_stats->shader_cycle_distro[2]++; // pipeline stalled
+
+    return issued_inst || no_active_warps || issue_warp_didnt_issue;
 }
 
 void scheduler_unit::do_on_warp_issued( unsigned warp_id,
@@ -1526,6 +1687,27 @@ bool scheduler_unit::sort_warps_by_oldest_dynamic_id(shd_warp_t* lhs, shd_warp_t
     } else {
         return lhs < rhs;
     }
+}
+
+void srr_scheduler::order_warps()
+{
+   m_next_cycle_prioritized_warps.clear();
+
+   std::vector<shd_warp_t*>::const_iterator iter = (m_last_supervised_issued == m_supervised_warps.end()) ? m_supervised_warps.begin() : (m_last_supervised_issued + 1);
+
+   for (int i = 0; i < m_supervised_warps.size(); i++, iter++)
+   {
+       // wrap around
+       if (iter == m_supervised_warps.end())
+       {
+           iter = m_supervised_warps.begin();
+       }
+       if (!((*iter)->done_exit()) && !m_shader->warp_waiting_at_barrier((*iter)->get_warp_id()) && !((*iter)->functional_done()))
+       {
+            m_next_cycle_prioritized_warps.push_back(*iter);
+           break;
+       }
+   }
 }
 
 void lrr_scheduler::order_warps()
@@ -2504,7 +2686,7 @@ void ldst_unit::issue( register_set &reg_set )
    assert(inst->empty() == false);
    if (inst->is_load() and inst->space.get_type() != shared_space) {
       if (inst->op == ATOMIC_OP){
-        printf("Cycle: %d, Atomic inst at ldst_unit::issue, skip adding pending writes as extended buffer flush will do it\n", gpu_sim_cycle);
+        //printf("Cycle: %d, Atomic inst at ldst_unit::issue, skip adding pending writes as extended buffer flush will do it\n", gpu_sim_cycle);
         unsigned warp_id = inst->warp_id();
         unsigned n_accesses = inst->accessq_count();
         unsigned int regs[8] = {666,0,0,0,0,0,0,0};
