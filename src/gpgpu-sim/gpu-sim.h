@@ -572,6 +572,11 @@ public:
    int core_to_flush;
    int warp_to_flush;
    int m_extended_buffer_flush_reqs;
+
+   // buffer flush stats
+   int interconnect_full_cycles;
+   int issue_warp_stalled_cycles;
+
    unsigned long long  gpu_sim_insn;
    unsigned long long  gpu_tot_sim_insn;
    unsigned long long  gpu_sim_insn_last_update;

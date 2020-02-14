@@ -787,6 +787,10 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    core_to_flush_for_stall = 0;
    warp_to_flush_for_stall = 0;
    m_extended_buffer_flush_reqs = 0;
+
+   //stats
+   interconnect_full_cycles = 0;
+   issue_warp_stalled_cycles = 0;
 }
 
 int gpgpu_sim::shared_mem_size() const

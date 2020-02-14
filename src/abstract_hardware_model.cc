@@ -261,7 +261,7 @@ void warp_inst_t::do_atomic( const active_mask_t& access_mask,bool forceDo ) {
             eb_rop_callback_t &eb_cb = m_per_scalar_thread[i].eb_rop_callback;
             
             if (eb_cb.function) {
-                printf("Doing extended buffer callback\n");
+                //printf("Doing extended buffer callback\n");
                 eb_cb.function(eb_cb.instruction, eb_cb.thread, eb_cb.addr, eb_cb.buffer_value);
             }
             else if( cb.thread ){
