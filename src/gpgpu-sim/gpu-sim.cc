@@ -790,7 +790,13 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
 
    //stats
    interconnect_full_cycles = 0;
-   issue_warp_stalled_cycles = 0;
+   tot_interconnect_full_cycles = 0;
+   buffer_pipeline_stalls = 0;
+   tot_buffer_pipeline_stalls = 0;
+   kernel_exit_flush_cycles = 0;
+   buffer_flush_cycles = 0;
+   buffer_entries_reuse = 0;
+   
 }
 
 int gpgpu_sim::shared_mem_size() const
@@ -981,6 +987,13 @@ void gpgpu_sim::update_stats() {
     gpu_sim_insn = 0;
     m_total_cta_launched = 0;
     gpu_occupancy = occupancy_stats();
+
+    interconnect_full_cycles = 0;
+    buffer_pipeline_stalls = 0;
+    kernel_exit_flush_cycles = 0;
+    buffer_flush_cycles = 0;
+    buffer_entries_reuse = 0;
+    
 }
 
 void gpgpu_sim::print_stats()
@@ -1179,6 +1192,17 @@ void gpgpu_sim::gpu_print_stat()
    //printf("partiton_replys_in_parallel_total    = %lld\n", partiton_replys_in_parallel_total );
    printf("L2_BW  = %12.4f GB/Sec\n", ((float)(partiton_replys_in_parallel * 32) / (gpu_sim_cycle * m_config.icnt_period)) / 1000000000);
    printf("L2_BW_total  = %12.4f GB/Sec\n", ((float)((partiton_replys_in_parallel+partiton_replys_in_parallel_total) * 32) / ((gpu_tot_sim_cycle+gpu_sim_cycle) * m_config.icnt_period)) / 1000000000 );
+
+   printf("\n");
+   printf("interconnect_full_cycles = %d\n", interconnect_full_cycles);
+   printf("buffer_pipeline_stalls = %d\n", buffer_pipeline_stalls);
+   printf("tot_interconnect_full_cycles = %d\n", tot_interconnect_full_cycles);
+   printf("tot_buffer_pipeline_stalls = %d\n\n", tot_buffer_pipeline_stalls);
+
+   printf("buffer_flush_cycles = %d\n", buffer_flush_cycles);
+   printf("kernel_exit_flush_cycles = %d\n", kernel_exit_flush_cycles);
+   printf("buffer_entries_reuse = %d\n",buffer_entries_reuse);
+   printf("\n");
 
    time_t curr_time;
    time(&curr_time);
@@ -1907,6 +1931,8 @@ void gpgpu_sim::cycle()
             flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush(warp_to_flush_for_stall);
             
             if(flushed_from_stall == -2){ // if interconnect is full, stay on this warp and retry next cycle
+               interconnect_full_cycles++;
+               tot_interconnect_full_cycles++;
                break;
             }
             
@@ -1924,8 +1950,15 @@ void gpgpu_sim::cycle()
 
       flushing_counter_for_stall = flushing_counter_for_stall % (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
 
-      if(num_flushed_from_stall >= 0){
+      if(num_flushed_from_stall > 0){
          m_extended_buffer_flush_reqs += num_flushed_from_stall;
+         //printf("Cycle %d, Buffer flushed\n", gpu_sim_cycle);
+         if(done){
+            kernel_exit_flush_cycles++;
+         }
+         else{
+            buffer_flush_cycles++;
+         }
       }
 
       //////////////////////// Kernel Exit Flush ////////////////////////
@@ -1986,6 +2019,7 @@ void gpgpu_sim::cycle()
             flushed = m_cluster[cluster_to_flush]->m_core[core_to_flush]->extended_buffer_flush(warp_to_flush);
             
             if(flushed == -2){ // if interconnect is full, stay on this warp and retry next cycle
+               interconnect_full_cycles++;
                break;
             }
             
@@ -2002,9 +2036,12 @@ void gpgpu_sim::cycle()
       }
       flushing_counter = flushing_counter % (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
 
-      if(num_flushed >= 0){
+      if(num_flushed > 0){
          m_extended_buffer_flush_reqs += num_flushed;
+         //printf("Cycle %d, kernel exit\n", gpu_sim_cycle);
+         kernel_exit_flush_cycles++;
       }
+
       
 #if (CUDART_VERSION >= 5000)
       //launch device kernel

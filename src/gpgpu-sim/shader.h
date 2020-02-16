@@ -68,6 +68,7 @@
 #define WRITE_PACKET_SIZE 8
 
 #define WRITE_MASK_SIZE 8
+extern gpgpu_sim* g_the_gpu; 
 
 enum exec_unit_type_t
 {
@@ -345,18 +346,7 @@ public:
         return (extended_buffer_num_entries-count);
     }
 
-    int extended_buffer_first_avail_slot(addr_t address) {
-        for (int i = 0; i < extended_buffer_num_entries; i++){
-            if (m_extended_buffer->address_list[i] == address) {
-                return i;
-            }
-            if (m_extended_buffer->address_list[i] == 0) {
-                return i;
-            }
-        }
-        m_extended_buffer_full_stall = true;
-        return -1; // if nothing was available, then it will return -1
-    }
+    int extended_buffer_first_avail_slot(addr_t address);
 
     void extended_buffer_occupy_slot(addr_t address, warp_inst_t* inst) {
         m_extended_buffer_freshly_initialied = false;

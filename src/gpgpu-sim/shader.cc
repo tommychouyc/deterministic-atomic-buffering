@@ -52,7 +52,7 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define MIN(a,b) (((a)<(b))?(a):(b))
     
-
+extern gpgpu_sim* g_the_gpu; 
 /////////////////////////////////////////////////////////////////////////////
 
 std::list<unsigned> shader_core_ctx::get_regs_written( const inst_t &fvt ) const
@@ -984,6 +984,20 @@ int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for
     return slots_flushed;
 }
 
+int shd_warp_t::extended_buffer_first_avail_slot(addr_t address) {
+    for (int i = 0; i < extended_buffer_num_entries; i++){
+        if (m_extended_buffer->address_list[i] == address) {
+            g_the_gpu->buffer_entries_reuse++;
+            return i;
+        }
+        if (m_extended_buffer->address_list[i] == 0) {
+            return i;
+        }
+    }
+    m_extended_buffer_full_stall = true;
+    return -1; // if nothing was available, then it will return -1
+}
+
 void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, const active_mask_t &active_mask, unsigned warpId)
 {
     for ( unsigned t=0; t < m_warp_size; t++ ) {
@@ -1613,6 +1627,7 @@ bool scheduler_unit::cycle()
             else if(issued > 1)
             	m_stats->dual_issue_nums[m_id]++;
             else if (!issue_warp_didnt_issue)
+            //else
             	abort();   //issued should be > 0
 
             break;
@@ -1626,6 +1641,11 @@ bool scheduler_unit::cycle()
         m_stats->shader_cycle_distro[1]++; // waiting for RAW hazards (possibly due to memory) 
     else if( !issued_inst ) 
         m_stats->shader_cycle_distro[2]++; // pipeline stalled
+
+    if( issue_warp_didnt_issue ){
+        g_the_gpu->buffer_pipeline_stalls++; // extended buffer stalled
+        g_the_gpu->tot_buffer_pipeline_stalls++;
+    }
 
     return issued_inst || no_active_warps || issue_warp_didnt_issue;
 }
@@ -2683,7 +2703,7 @@ void ldst_unit::issue( register_set &reg_set )
 	m_core->incmem_stat(m_core->get_config()->warp_size,1);
 	pipelined_simd_unit::issue(reg_set);
 }
-extern gpgpu_sim* g_the_gpu; 
+
 void ldst_unit::writeback()
 {
     // process next instruction that is going to writeback
