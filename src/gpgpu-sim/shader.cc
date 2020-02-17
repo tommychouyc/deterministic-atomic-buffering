@@ -902,7 +902,7 @@ void buffer_flush_atomic_callback( const inst_t* inst, ptx_thread_info* thread, 
 
 }
 
-int shader_core_ctx::extended_buffer_flush( unsigned warpId ) // add a check for m_extended_buffer_full_stall except for the final kernel end flush
+int shader_core_ctx::extended_buffer_flush_warp_level( unsigned warpId ) // add a check for m_extended_buffer_full_stall except for the final kernel end flush
 {
     if(!(m_warp[warpId].m_extended_buffer_in_use)){
         return -1;
@@ -1608,29 +1608,60 @@ bool scheduler_unit::cycle()
             }
             checked++;
         }
-        if ( issued || issue_warp_didnt_issue) {
-            // This might be a bit inefficient, but we need to maintain
-            // two ordered list for proper scheduler execution.
-            // We could remove the need for this loop by associating a
-            // supervised_is index with each entry in the m_next_cycle_prioritized_warps
-            // vector. For now, just run through until you find the right warp_id
-            for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
-                  supervised_iter != m_supervised_warps.end();
-                  ++supervised_iter ) {
-                if ( *iter == *supervised_iter ) {
-                    m_last_supervised_issued = supervised_iter;
+
+        std::string sched_config = m_shader->m_config->gpgpu_scheduler_string;
+        bool srr = sched_config.find("srr") != std::string::npos;
+        if(srr){
+            if ( issued || issue_warp_didnt_issue) {
+            //if ( issued ) {
+                // This might be a bit inefficient, but we need to maintain
+                // two ordered list for proper scheduler execution.
+                // We could remove the need for this loop by associating a
+                // supervised_is index with each entry in the m_next_cycle_prioritized_warps
+                // vector. For now, just run through until you find the right warp_id
+                for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
+                    supervised_iter != m_supervised_warps.end();
+                    ++supervised_iter ) {
+                    if ( *iter == *supervised_iter ) {
+                        m_last_supervised_issued = supervised_iter;
+                    }
                 }
+
+                if(issued == 1)
+                    m_stats->single_issue_nums[m_id]++;
+                else if(issued > 1)
+                    m_stats->dual_issue_nums[m_id]++;
+                else if (!issue_warp_didnt_issue)
+                //else
+                    abort();   //issued should be > 0
+
+                break;
             }
+        }
+        else{
+            if ( issued ) {
+                // This might be a bit inefficient, but we need to maintain
+                // two ordered list for proper scheduler execution.
+                // We could remove the need for this loop by associating a
+                // supervised_is index with each entry in the m_next_cycle_prioritized_warps
+                // vector. For now, just run through until you find the right warp_id
+                for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
+                    supervised_iter != m_supervised_warps.end();
+                    ++supervised_iter ) {
+                    if ( *iter == *supervised_iter ) {
+                        m_last_supervised_issued = supervised_iter;
+                    }
+                }
 
-            if(issued == 1)
-            	m_stats->single_issue_nums[m_id]++;
-            else if(issued > 1)
-            	m_stats->dual_issue_nums[m_id]++;
-            else if (!issue_warp_didnt_issue)
-            //else
-            	abort();   //issued should be > 0
+                if(issued == 1)
+                    m_stats->single_issue_nums[m_id]++;
+                else if(issued > 1)
+                    m_stats->dual_issue_nums[m_id]++;
+                else
+                    abort();   //issued should be > 0
 
-            break;
+                break;
+            }
         } 
     }
 
@@ -1642,7 +1673,7 @@ bool scheduler_unit::cycle()
     else if( !issued_inst ) 
         m_stats->shader_cycle_distro[2]++; // pipeline stalled
 
-    if( issue_warp_didnt_issue ){
+    if( !issued_inst && issue_warp_didnt_issue ){
         g_the_gpu->buffer_pipeline_stalls++; // extended buffer stalled
         g_the_gpu->tot_buffer_pipeline_stalls++;
     }
@@ -4471,7 +4502,7 @@ int simt_core_cluster::extended_buffer_flush_all()
     //printf("Kernel is exiting, flush all remaining extended buffers\n");
     for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ){
         for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
-            flushed = m_core[i]->extended_buffer_flush(warp_id);
+            flushed = m_core[i]->extended_buffer_flush_warp_level(warp_id);
             num_flushed += flushed;
             if(flushed){
                 printf("Flushing core: %d, warp: %d, num_flushed: %d\n", i, warp_id, num_flushed);

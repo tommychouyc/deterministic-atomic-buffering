@@ -2488,7 +2488,7 @@ public:
 	 void inc_simt_to_mem(unsigned n_flits){ m_stats->n_simt_to_mem[m_sid] += n_flits; }
 	 bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
 
-     int extended_buffer_flush( unsigned warpId );
+     int extended_buffer_flush_warp_level( unsigned warpId );
      bool check_extended_buffer_stall_all() { // checks if all warps in the sm are stalled from extended buffer
          for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
              if (m_warp[warp_id].m_extended_buffer_in_use) {
@@ -2524,6 +2524,7 @@ public:
      }
 
     std::vector<shd_warp_t>   m_warp;   // per warp information array
+    const shader_core_config *m_config;
 
 	private:
 	 unsigned inactive_lanes_accesses_sfu(unsigned active_count,double latency){
@@ -2568,7 +2569,7 @@ public:
     // general information
     unsigned m_sid; // shader id
     unsigned m_tpc; // texture processor cluster id (aka, node id when using interconnect concentration)
-    const shader_core_config *m_config;
+    
     const memory_config *m_memory_config;
     class simt_core_cluster *m_cluster;
 

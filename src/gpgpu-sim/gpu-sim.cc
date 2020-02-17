@@ -1195,9 +1195,9 @@ void gpgpu_sim::gpu_print_stat()
 
    printf("\n");
    printf("interconnect_full_cycles = %d\n", interconnect_full_cycles);
-   printf("buffer_pipeline_stalls = %d\n", buffer_pipeline_stalls);
    printf("tot_interconnect_full_cycles = %d\n", tot_interconnect_full_cycles);
-   printf("tot_buffer_pipeline_stalls = %d\n\n", tot_buffer_pipeline_stalls);
+   printf("buffer_pipeline_stalls = %d\n", buffer_pipeline_stalls);
+   printf("tot_buffer_pipeline_stalls = %d\n", tot_buffer_pipeline_stalls);
 
    printf("buffer_flush_cycles = %d\n", buffer_flush_cycles);
    printf("kernel_exit_flush_cycles = %d\n", kernel_exit_flush_cycles);
@@ -1878,7 +1878,7 @@ void gpgpu_sim::cycle()
          while(flushing_counter_for_stall < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             for( unsigned i=0; i < m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster; i++ ){
                for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
-                  flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[i]->extended_buffer_flush(warp_id);
+                  flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[i]->extended_buffer_flush_warp_level(warp_id);
                   flushing_counter_for_stall++;
                   if(flushed_from_stall > 0){
                      printf("Cycle: %u, All warps in cluster that are using the buffer are stalled, Flushing cluster: %d, core: %d, warp: %d, buffers_flushed: %d, total flushed: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, i, warp_id, flushed_from_stall, num_flushed_from_stall);
@@ -1904,7 +1904,7 @@ void gpgpu_sim::cycle()
       /*if(buffer_stalled){
          while(flushing_counter_for_stall < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             printf("Cycle %d, At stall flush, Cluster: %d, Core: %d, Warp: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, warp_to_flush_for_stall);
-            flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush(warp_to_flush_for_stall);
+            flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_warp_level(warp_to_flush_for_stall);
             
             if(flushed_from_stall == -2){ // if interconnect is full, stay on this warp and retry next cycle
                break;
@@ -1928,7 +1928,7 @@ void gpgpu_sim::cycle()
       if(buffer_stalled){
          while(flushing_counter_for_stall < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             //printf("Cycle %d, At stall flush, Cluster: %d, Core: %d, Warp: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, warp_to_flush_for_stall);
-            flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush(warp_to_flush_for_stall);
+            flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_warp_level(warp_to_flush_for_stall);
             
             if(flushed_from_stall == -2){ // if interconnect is full, stay on this warp and retry next cycle
                interconnect_full_cycles++;
@@ -1971,7 +1971,7 @@ void gpgpu_sim::cycle()
          while(flushing_counter < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             for( unsigned i=0; i < m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster; i++ ){
                for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
-                  flushed = m_cluster[cluster_to_flush]->m_core[i]->extended_buffer_flush(warp_id);
+                  flushed = m_cluster[cluster_to_flush]->m_core[i]->extended_buffer_flush_warp_level(warp_id);
                   flushing_counter++;
                   if(flushed > 0){
                      printf("Flushing cluster: %d, core: %d, warp: %d, buffers_flushed: %d, total flushed: %u\n", cluster_to_flush, i, warp_id, flushed, num_flushed);
@@ -1992,7 +1992,7 @@ void gpgpu_sim::cycle()
       /*if(done){
          while(flushing_counter < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             printf("Cycle %d, At done flush, Cluster: %d, Core: %d, Warp: %d\n", gpu_sim_cycle, cluster_to_flush, core_to_flush, warp_to_flush);
-            flushed = m_cluster[cluster_to_flush]->m_core[core_to_flush]->extended_buffer_flush(warp_to_flush);
+            flushed = m_cluster[cluster_to_flush]->m_core[core_to_flush]->extended_buffer_flush_warp_level(warp_to_flush);
 
             if(flushed == -2){ // if interconnect is full, stay on this warp and retry next cycle
                break;
@@ -2016,7 +2016,7 @@ void gpgpu_sim::cycle()
       if(done && !buffer_stalled){
          while(flushing_counter < (MAX_WARP_PER_SHADER * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             //printf("Cycle %d, At done flush, Cluster: %d, Core: %d, Warp: %d\n", gpu_sim_cycle, cluster_to_flush, core_to_flush, warp_to_flush);
-            flushed = m_cluster[cluster_to_flush]->m_core[core_to_flush]->extended_buffer_flush(warp_to_flush);
+            flushed = m_cluster[cluster_to_flush]->m_core[core_to_flush]->extended_buffer_flush_warp_level(warp_to_flush);
             
             if(flushed == -2){ // if interconnect is full, stay on this warp and retry next cycle
                interconnect_full_cycles++;
