@@ -798,9 +798,18 @@ void shader_core_ctx::fetch()
             for( unsigned i=0; i < m_config->max_warps_per_shader; i++ ) {
                 unsigned warp_id = (m_last_warp_fetched+1+i) % m_config->max_warps_per_shader;
 
-                // this code checks if this warp has finished executing and can be reclaimed  !m_warp[warp_id].m_extended_buffer_freshly_initialied &&
-                //if( m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit() ) {
-                if(!m_warp[warp_id].m_extended_buffer_in_use &&  m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){
+                // this code checks if this warp has finished executing and can be reclaimed
+                //if( m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit() ) { // original
+                //if(!m_warp[warp_id].m_extended_buffer_in_use && m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){ // for warp level buffers
+                bool warp_using_sch_buffer = false;
+                for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
+                    warp_using_sch_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
+                    if(warp_using_sch_buffer){
+                        break; // warp_id found in schduler buffer
+                    }
+                }
+
+                if(!warp_using_sch_buffer && m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){ // for sch level buffers
                     bool did_exit=false;
                     for( unsigned t=0; t<m_config->warp_size;t++) {
                         unsigned tid=warp_id*m_config->warp_size+t;
@@ -864,10 +873,10 @@ void shader_core_ctx::fetch()
     m_L1I->cycle();
 }
 
-void shader_core_ctx::func_exec_inst( warp_inst_t &inst, unsigned warpId, const active_mask_t &active_mask )
+void shader_core_ctx::func_exec_inst( warp_inst_t &inst, unsigned warpId, const active_mask_t &active_mask, unsigned sch_id )
 {
     //execute_warp_inst_t(inst);
-    core_execute_warp_inst_t_atomic_add(inst, active_mask, warpId);
+    core_execute_warp_inst_t_atomic_add(inst, active_mask, sch_id, warpId);
     
     if( inst.is_load() || inst.is_store() )
     {
@@ -984,6 +993,91 @@ int shader_core_ctx::extended_buffer_flush_warp_level( unsigned warpId ) // add 
     return slots_flushed;
 }
 
+int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a check for m_extended_buffer_full_stall except for the final kernel end flush
+{
+    int warpId; // hardcoded placeholder
+    if(!(schedulers[sch_id]->m_extended_buffer_in_use)){
+        return -1;
+    }
+
+    int count = 0;
+    for( int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // find how many will be pushed to interconnect
+        if(schedulers[sch_id]->m_extended_buffer->address_list[i] != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
+            count++;
+        }
+    }
+
+    if (count == 0){
+        //printf("Warp: %d, Nothing to flush\n", warpId);
+        return 0;
+    }
+
+    if(m_icnt->full(40*count,true)){ // used to be just 32, 40 is flit size
+        //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
+        return -2;
+    }
+    //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d @@@@@@@@@@@\n", count);
+    //schedulers[sch_id]->extended_buffer_print_contents();
+    int slots_flushed = 0;
+    for( int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // only generate mf for the entries that are in use, aka addr != 0
+        new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
+        if (addr != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
+            warpId = schedulers[sch_id]->m_extended_buffer->warp_tracker[i];
+            // Make the mem_access
+            const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_mem_access_for_entry(i); // TODO: FIX this function to only make the mask to 1 thread
+
+            // Make the inst for mem_fetch
+            warp_inst_t* inst = new warp_inst_t(m_config);
+            inst->set_cache_op(CACHE_GLOBAL);
+            inst->set_op(ATOMIC_OP);
+            inst->set_oprnd_type(FP_OP);
+            inst->set_space(global_space);
+            inst->set_memory_op(no_memory_op);
+            inst->set_data_size(32); // not sure if 32
+            inst->set_m_warp_id(warpId); // maybe
+            inst->set_m_scheduler_id(sch_id);
+            inst->set_out(666); //maaaaaaaaaaaybeeeeeeeeee, hard coded value
+            inst->set_outcount(1); // hardcode
+            //inst->set_in();
+            //inst->set_incount(0);
+            //m_ldst_unit->m_pending_writes[warpId][666] += 1; // what should this be? the original atomic handled this
+
+            // active mask shoud be only 1 bit since the bits of the mask determine which threads perform their callback, 
+            // so i only need 1 thread in the warp to perform 1 callback since i only have 1 buffer value
+            active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
+            for( unsigned j=0; j < m_config->warp_size; j++ ){
+                if( active_mask.test(j) ){
+                    inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
+                    unsigned warp_id = warpId;
+                    // unique hardware warp id across the entire GPU
+                    unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
+
+                    // Add callback to the inst to perform the flush atomic
+                    inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->extended_buffer_get_value(addr), addr);
+                    //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
+                }
+            }
+
+            // Make the mem_fetch
+            inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[sch_id]->get_schd_id()); // is the schd_id correct?
+		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
+		    m_icnt->push(mf);
+            //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
+
+            // increment some logs
+            m_warp[warpId].inc_n_atomic(); // maybe
+            // Slot cleared in ldst writeback
+            schedulers[sch_id]->m_extended_buffer->flushed[i] = true;
+            slots_flushed++;
+        }
+    }
+
+    if(slots_flushed == 0){
+        //printf("Warp: %d, Nothing flushed\n", warpId);
+    }
+    return slots_flushed;
+}
+
 int shd_warp_t::extended_buffer_first_avail_slot(addr_t address) {
     for (int i = 0; i < extended_buffer_num_entries; i++){
         if (m_extended_buffer->address_list[i] == address) {
@@ -998,7 +1092,7 @@ int shd_warp_t::extended_buffer_first_avail_slot(addr_t address) {
     return -1; // if nothing was available, then it will return -1
 }
 
-void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, const active_mask_t &active_mask, unsigned warpId)
+void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, const active_mask_t &active_mask, unsigned sch_id, unsigned warpId)
 {
     for ( unsigned t=0; t < m_warp_size; t++ ) {
         if( inst.active(t) ) {
@@ -1042,15 +1136,21 @@ void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, con
                     //printf("Executing atomic_add for warp: %u thread: %u, tid: %u, addr: %llu, val: %f\n", warpId, t, tid, insn_memaddr, insn_operand);
 
                     // find which buffer slot to write to and occupy the slot by writing to the address list
-                    //printf("===============================core_execute_warp_inst_t_atomic_add===============================\n");
-                    m_warp[warpId].extended_buffer_occupy_slot(insn_memaddr, &inst);
+                    //printf("===============================core_execute_warp_inst_t_atomic_add, Sch: %d ===============================\n", sch_id);
+
+                    // Warp level buffers
+                    /*m_warp[warpId].extended_buffer_occupy_slot(insn_memaddr, &inst);
                     m_warp[warpId].extended_buffer_fp32_add(insn_memaddr, insn_operand);
                     //m_warp[warpId].extended_buffer_print_contents();
-                    
-                    // mark the instruction as complete?
-                    float extended_buffer_val = m_warp[warpId].extended_buffer_get_value(insn_memaddr);
-                    m_thread[tid]->ptx_exec_inst_atomic_add_only(inst,t,extended_buffer_val,true); // i think this advances the pc and stuff
+                    float extended_buffer_val = m_warp[warpId].extended_buffer_get_value(insn_memaddr);*/
 
+                    // Scheduler level buffers
+                    schedulers[sch_id]->extended_buffer_occupy_slot(insn_memaddr, warpId);
+                    schedulers[sch_id]->extended_buffer_fp32_add(insn_memaddr, insn_operand);
+                    //schedulers[sch_id]->extended_buffer_print_contents();
+                    float extended_buffer_val = schedulers[sch_id]->extended_buffer_get_value(insn_memaddr);
+
+                    m_thread[tid]->ptx_exec_inst_atomic_add_only(inst,t,extended_buffer_val,true); // i think this advances the pc and stuff
                     //m_thread[tid]->ptx_exec_inst(inst,t); // replace this with buffer add
                     //printf("####################### END core_execute_warp_inst_t_atomic_add #######################\n");
                 }
@@ -1115,7 +1215,8 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
 	warp_inst_t** pipe_reg = pipe_reg = pipe_reg_set.get_free(m_config->sub_core_model, sch_id);
     assert(pipe_reg);
 
-    if(next_inst->op==ATOMIC_OP || next_inst->isatomic()){
+    // Warp level buffers
+    /*if(next_inst->op==ATOMIC_OP || next_inst->isatomic()){
         // check buffer to see if full or not
         //printf("####################### ISSUE_WARP #######################\n");
         //printf("Cycle: %d, warp id: %u, m_thread: %u, buff locations remaining: %d, buff full: %d, full stall: %d\n", gpu_sim_cycle, warp_id, m_thread, m_warp[warp_id].extended_buffer_locations_remaining(), m_warp[warp_id].extended_buffer_full(), m_warp[warp_id].get_extended_buffer_full_stall());
@@ -1161,6 +1262,58 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
         }
         //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), m_warp[warp_id].extended_buffer_locations_remaining());
         //printf("####################### END ISSUE_WARP #######################\n\n");
+    }*/
+
+    // Scheduler level buffers
+    if(next_inst->op==ATOMIC_OP || next_inst->isatomic()){
+        // check buffer to see if full or not
+        //printf("####################### ISSUE_WARP #######################\n");
+        //printf("Cycle: %d, warp id: %u, sch id: %u, m_thread: %u, buff locations remaining: %d, buff full: %d, full stall: %d\n", gpu_sim_cycle, warp_id, sch_id, m_thread, schedulers[sch_id]->extended_buffer_locations_remaining(), schedulers[sch_id]->extended_buffer_full(), schedulers[sch_id]->get_extended_buffer_full_stall());
+        /*if(schedulers[sch_id]->get_extended_buffer_full_stall()){
+            return false;
+        }*/    
+        if(schedulers[sch_id]->extended_buffer_full()){
+            schedulers[sch_id]->set_extended_buffer_full_stall();
+            return false;
+        }
+        // see what locations the atomic will write to
+        addr_t insn_memaddr = 0;
+        std::vector<addr_t> diff_addrs;
+        const ptx_instruction *pI;
+        for (unsigned thread = 0; thread < m_warp_size; thread++) {
+            if(active_mask[thread]) {
+                pI = (*(m_thread[warp_id*m_warp_size+thread])).func_info()->get_instruction((*(m_thread[warp_id*m_warp_size+thread])).get_pc());
+                find_atomic_address(pI, m_thread[warp_id*m_warp_size+thread]);
+                insn_memaddr = (*(m_thread[warp_id*m_warp_size+thread])).last_eaddr();
+                //printf("shader id: %u, warp id: %u, sch id: %u, thd in warp: %u, pc=%u, address: %u\n", m_sid, warp_id, sch_id, thread, (*(m_thread[warp_id*m_warp_size+thread])).get_pc(), insn_memaddr);
+                //if(pI->get_atomic() == 393){ // make sure this is ATOMIC_ADD
+                    // add the atomic memory locations to diff_addrs vector, num_different is size of diff_addrs vector
+                    bool different;
+                    for (int i = 0; i < 1; i++) { // change to size of entries
+                        different = true;
+                        if(schedulers[sch_id]->m_extended_buffer->address_list[i] == insn_memaddr){
+                            different = false;
+                            break;
+                        } 
+                    }
+                    if (different){
+                        if ( std::find(diff_addrs.begin(), diff_addrs.end(), insn_memaddr) != diff_addrs.end() ){
+                            // found non-matching address in diff_addr vector already
+                        }
+                        else {
+                            diff_addrs.push_back(insn_memaddr);
+                        }
+                    }
+                //}
+            }
+        }
+        // see if there's enough space in the buffer
+        if(schedulers[sch_id]->extended_buffer_locations_remaining() < diff_addrs.size()){
+            schedulers[sch_id]->set_extended_buffer_full_stall(); // newly added
+            return false; // not enough space
+        }
+        //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), schedulers[sch_id]->extended_buffer_locations_remaining());
+        //printf("####################### END ISSUE_WARP #######################\n\n");
     }
 
     m_warp[warp_id].ibuffer_free();
@@ -1168,7 +1321,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
     **pipe_reg = *next_inst; // static instruction information
     (*pipe_reg)->issue( active_mask, warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, m_warp[warp_id].get_dynamic_warp_id(), sch_id ); // dynamic instruction information
     m_stats->shader_cycle_distro[2+(*pipe_reg)->active_count()]++;
-    func_exec_inst( **pipe_reg, warp_id, active_mask );
+    func_exec_inst( **pipe_reg, warp_id, active_mask, sch_id );
     if( next_inst->op == BARRIER_OP ){
         m_warp[warp_id].store_info_of_last_inst_at_barrier(*pipe_reg);
         m_barriers.warp_reaches_barrier(m_warp[warp_id].get_cta_id(),warp_id,const_cast<warp_inst_t*> (next_inst));
@@ -1330,6 +1483,19 @@ shd_warp_t& scheduler_unit::warp(int i){
     return (*m_warp)[i];
 }
 
+int scheduler_unit::extended_buffer_first_avail_slot(addr_t address) {
+    for (int i = 0; i < extended_buffer_num_entries; i++){
+        if (m_extended_buffer->address_list[i] == address) {
+            g_the_gpu->buffer_entries_reuse++;
+            return i;
+        }
+        if (m_extended_buffer->address_list[i] == 0) {
+            return i;
+        }
+    }
+    m_extended_buffer_full_stall = true;
+    return -1; // if nothing was available, then it will return -1
+}
 
 /**
  * A general function to order things in a Loose Round Robin way. The simplist use of this
@@ -2747,7 +2913,8 @@ void ldst_unit::writeback()
                     insn_completed = true;
                     //flush individual buffer slots here, modify clear slot function to set in use to false when all are clear
                     new_addr_type addr = m_next_wb.m_per_scalar_thread[1].eb_rop_callback.addr;
-                    m_core->m_warp[m_next_wb.m_warp_id].extended_buffer_clear_slot(addr);
+                    //m_core->m_warp[m_next_wb.m_warp_id].extended_buffer_clear_slot(addr); // for warp level buffers
+                    m_core->schedulers[m_next_wb.m_scheduler_id]->extended_buffer_clear_slot(addr); // for scheduler level buffers
                 }
                 if(g_the_gpu->m_extended_buffer_flush_reqs == 0){
                     m_pending_writes[m_next_wb.warp_id()].erase(m_next_wb.out[0]);
@@ -3628,10 +3795,6 @@ void shader_core_ctx::cycle()
 
 	m_stats->shader_cycles[m_sid]++;
 
-    if(check_extended_buffer_stall_all()){
-        //printf("All buffers that are in use are full, time to stall\n");
-    }
-
     writeback();
     execute();
     read_operands();
@@ -4471,11 +4634,11 @@ unsigned simt_core_cluster::get_n_active_sms() const
     return n;
 }
 
-bool simt_core_cluster::check_extended_buffer_stall()
+bool simt_core_cluster::check_extended_buffer_stall_warp_level_buffer()
 {
     bool is_stalled;
     for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
-        is_stalled = m_core[i]->check_extended_buffer_stall_all();
+        is_stalled = m_core[i]->check_extended_buffer_stall_all_warp_level_buffer();
         if(is_stalled == false){
             return false;
         }
@@ -4483,11 +4646,35 @@ bool simt_core_cluster::check_extended_buffer_stall()
     return true;
 }
 
-bool simt_core_cluster::check_everything_done_except_flush()
+bool simt_core_cluster::check_everything_done_except_flush_warp_level_buffer()
 {
     bool done;
     for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
-        done = m_core[i]->check_if_shaders_are_done();
+        done = m_core[i]->check_if_shaders_are_done_warp_level_buffer();
+        if(done == false){
+            return false;
+        }
+    }
+    return true;
+}
+
+bool simt_core_cluster::check_extended_buffer_stall_sch_level_buffer()
+{
+    bool is_stalled;
+    for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
+        is_stalled = m_core[i]->check_extended_buffer_stall_all_sch_level_buffer();
+        if(is_stalled == false){
+            return false;
+        }
+    }
+    return true;
+}
+
+bool simt_core_cluster::check_everything_done_except_flush_sch_level_buffer()
+{
+    bool done;
+    for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
+        done = m_core[i]->check_if_shaders_are_done_sch_level_buffer();
         if(done == false){
             return false;
         }

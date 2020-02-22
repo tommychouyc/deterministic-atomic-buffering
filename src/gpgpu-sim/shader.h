@@ -102,13 +102,15 @@ public:
             address_list.push_back(0);
             buffer.push_back(0);
             flushed.push_back(false);
+            warp_tracker.push_back(-1);
         }
     }
     std::vector<new_addr_type> address_list;
-    //warp_inst_t* inst_list [8]; // also store the first inst ptr that uses the buffer as a proxy to generate the mem access and mem fetch
     //std::vector<unsigned int*> buffer;
     std::vector<float> buffer;
     std::vector<bool> flushed;
+
+    std::vector<int> warp_tracker; // for schduler level buffers: tracks the last warp in that shader that uses a buffer entry so it doesnt exit and not process the flush ack
 };
 
 class shd_warp_t {
@@ -358,28 +360,12 @@ public:
         }
         m_extended_buffer_in_use = true;
         m_extended_buffer->address_list[buffer_idx] = address;
-        //if(!m_extended_buffer.inst_list[buffer_idx]){ // stores the last inst that uses the buffer
-            //m_extended_buffer.inst_list[buffer_idx] = inst;
-        //}
-    }
-
-    void copy_most_recent_inst() { // should probably be called after generate_mem_access to get the most recent version
-        for (int i = 0; i < extended_buffer_num_entries; i++){
-            /*warp_inst_t old_inst = *(m_extended_buffer.inst_list[i]);
-            warp_inst_t* copy = new warp_inst_t();
-            *copy = old_inst.copy_inst();
-            m_extended_buffer.inst_list[i] = copy;*/
-        }
     }
 
     void extended_buffer_clear_slot_value(addr_t address){
         //m_extended_buffer_full_stall = false;
         for (int i = 0; i < extended_buffer_num_entries; i++){
             if (m_extended_buffer->address_list[i] == address) {
-                //m_extended_buffer.inst_list[i] = 0;
-                /*for (int j = 0; j < extended_buffer_buff_size; j++){
-                    m_extended_buffer->buffer[i][j] = 0;
-                }*/
                 m_extended_buffer->buffer[i] = 0;
             }
         }
@@ -390,10 +376,6 @@ public:
         for (int i = 0; i < extended_buffer_num_entries; i++){
             if (m_extended_buffer->address_list[i] == address) {
                 m_extended_buffer->address_list[i] = 0;
-                //m_extended_buffer.inst_list[i] = 0;
-                /*for (int j = 0; j < extended_buffer_buff_size; j++){
-                    m_extended_buffer->buffer[i][j] = 0;
-                }*/
                 m_extended_buffer->buffer[i] = 0;
                 m_extended_buffer->flushed[i] = false;
             }
@@ -415,10 +397,6 @@ public:
         m_extended_buffer_in_use = false;
         for (int i = 0; i < extended_buffer_num_entries; i++){
             m_extended_buffer->address_list[i] = 0;
-            //m_extended_buffer.inst_list[i] = 0;
-            /*for (int j = 0; j < extended_buffer_buff_size; j++){
-                m_extended_buffer->buffer[i][j] = 0;
-            }*/
             m_extended_buffer->buffer[i] = 0;
         }
     }
@@ -853,7 +831,12 @@ public:
                    int id) 
         : m_supervised_warps(), m_stats(stats), m_shader(shader),
         m_scoreboard(scoreboard), m_simt_stack(simt), /*m_pipeline_reg(pipe_regs),*/ m_warp(warp),
-        m_sp_out(sp_out),m_dp_out(dp_out),m_sfu_out(sfu_out),m_int_out(int_out),m_tensor_core_out(tensor_core_out),m_mem_out(mem_out), m_id(id){}
+        m_sp_out(sp_out),m_dp_out(dp_out),m_sfu_out(sfu_out),m_int_out(int_out),m_tensor_core_out(tensor_core_out),m_mem_out(mem_out), m_id(id){
+        m_extended_buffer = new extended_buffer();
+        m_extended_buffer_full_stall = false;
+        m_extended_buffer_in_use = false;
+        m_extended_buffer_freshly_initialied = true;
+    }
     virtual ~scheduler_unit(){}
     virtual void add_supervised_warp_id(int i) {
         m_supervised_warps.push_back(&warp(i));
@@ -900,6 +883,167 @@ public:
     virtual void order_warps() = 0;
 
     int get_schd_id() const {return m_id;}
+
+    // Scheduler level extended buffer
+    extended_buffer *m_extended_buffer;
+    bool m_extended_buffer_full_stall;
+    bool m_extended_buffer_in_use;
+    bool m_extended_buffer_freshly_initialied;
+    static const unsigned extended_buffer_num_entries=32; // how many addresses we can store
+    static const unsigned extended_buffer_buff_size=8; // how long the buffer is
+
+    bool get_extended_buffer_full_stall() { return m_extended_buffer_full_stall; }
+    void set_extended_buffer_full_stall() { m_extended_buffer_full_stall = true; }
+
+    mem_access_t extended_buffer_generate_mem_access_for_entry( int entry_idx ) {
+        mem_access_type access_type = GLOBAL_ACC_R;
+        new_addr_type addr = m_extended_buffer->address_list[entry_idx];
+        unsigned int size = 32; // in our case equals segment_size
+        bool is_write = false;
+        warp_inst_t::transaction_info info;
+        unsigned chunk = (addr&127)/32; // which 32-byte chunk within in a 128-byte chunk does this thread access?
+        unsigned thread = 1;
+        info.chunks.set(chunk);
+        info.active.set(thread);
+        unsigned idx = (addr&127);
+        unsigned int data_size = 4;
+        for( unsigned i=0; i < data_size; i++ ) {
+            //assert(!info.bytes.test(idx+i));
+            //info.bytes.set(idx+i);
+            info.bytes.set(i);
+        }
+        mem_access_t buffer_mem_access = mem_access_t(access_type,addr,size,is_write,info.active,info.bytes,info.chunks);
+        return buffer_mem_access;
+    }
+
+    bool extended_buffer_full() {
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if(m_extended_buffer->address_list[i] == 0){
+                return false;
+            }
+        }
+        return true;
+    }
+
+    int extended_buffer_locations_remaining() {
+        int count = 0;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if(m_extended_buffer->address_list[i] != 0){
+                count++;
+            }
+        }
+        return (extended_buffer_num_entries-count);
+    }
+
+    void extended_buffer_clear_slot(addr_t address) {
+        //m_extended_buffer_full_stall = false;
+        int i;
+        for (i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->address_list[i] == address) {
+                m_extended_buffer->address_list[i] = 0;
+                m_extended_buffer->buffer[i] = 0;
+                m_extended_buffer->flushed[i] = false;
+                m_extended_buffer->warp_tracker[i] = -1;
+                break;
+            }
+        }
+
+        for (int j = 0; j < extended_buffer_num_entries; j++){ // checks if all slots are cleared
+            if (m_extended_buffer->address_list[j] == 0){
+                // checks if slot i is cleared
+            }
+            else {
+                return;
+            }
+        }
+        //printf("All sch buffer slots cleared, clear whole buffer, slot %d cleared\n", i);
+        m_extended_buffer_in_use = false;
+        extended_buffer_clear_all();
+    }
+
+    bool find_warp_in_buffer(int warp_id){
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->warp_tracker[i] == warp_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void extended_buffer_clear_all() {
+        m_extended_buffer_full_stall = false;
+        m_extended_buffer_in_use = false;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            m_extended_buffer->address_list[i] = 0;
+            m_extended_buffer->buffer[i] = 0;
+            m_extended_buffer->flushed[i] = false;
+            m_extended_buffer->warp_tracker[i] = -1;
+        }
+    }
+
+    void extended_buffer_print_contents() {
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            printf("Slot %d, Last used warp: %d, Addr: %llu, Buffer: ", i, m_extended_buffer->warp_tracker[i], m_extended_buffer->address_list[i]);
+            //print_buffer(m_extended_buffer->buffer[i]);
+            printf("%f\n", m_extended_buffer->buffer[i]);
+        }
+        printf("\n");
+    }
+
+    int extended_buffer_find_idx(addr_t address){
+        int buff_idx = -1;
+        for (int i = 0; i < extended_buffer_num_entries; i++){
+            if (m_extended_buffer->address_list[i] == address){
+                buff_idx = i;
+                break;
+            }
+        }
+        return buff_idx; // returns -1 if cant find address
+    }
+
+    int extended_buffer_first_avail_slot(addr_t address);
+    void extended_buffer_occupy_slot(addr_t address, unsigned warp_id) {
+        m_extended_buffer_freshly_initialied = false;
+        assert(address != 0);
+        int buffer_idx = extended_buffer_first_avail_slot(address);
+        if(buffer_idx == -1){
+            assert(buffer_idx != -1);
+            return;
+        }
+        m_extended_buffer_in_use = true;
+        m_extended_buffer->address_list[buffer_idx] = address;
+        m_extended_buffer->warp_tracker[buffer_idx] = warp_id;
+    }
+
+    void extended_buffer_fp32_add(addr_t address, float input_num) {
+        int buffer_idx = extended_buffer_find_idx(address);
+
+        if(buffer_idx == -1){
+            printf("Address: %llu not found in buffer, nothing was added\n", address);
+            return;
+        }
+        m_extended_buffer->buffer[buffer_idx] += input_num;
+    }
+
+    float extended_buffer_get_value(addr_t address) {
+        int buffer_idx = extended_buffer_find_idx(address);
+
+        if(buffer_idx == -1){
+            printf("Address: %llu not found in buffer, nothing was added\n", address);
+            return 0;
+        }
+        return m_extended_buffer->buffer[buffer_idx];
+    }
+
+    void extended_buffer_set_flushed(addr_t address) {
+        int buffer_idx = extended_buffer_find_idx(address);
+
+        if(buffer_idx == -1){
+            printf("Address: %llu not found in buffer, nothing was added\n", address);
+            return;
+        }
+        m_extended_buffer->flushed[buffer_idx] = true;
+    }
 
 protected:
     virtual void do_on_warp_issued( unsigned warp_id,
@@ -2489,7 +2633,8 @@ public:
 	 bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
 
      int extended_buffer_flush_warp_level( unsigned warpId );
-     bool check_extended_buffer_stall_all() { // checks if all warps in the sm are stalled from extended buffer
+     int extended_buffer_flush_sch_level( unsigned sch_id );
+     bool check_extended_buffer_stall_all_warp_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
          for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
              if (m_warp[warp_id].m_extended_buffer_in_use) {
                 if( m_warp[warp_id].get_extended_buffer_full_stall() || (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()) || m_warp[warp_id].functional_done() ) { // case where it is a stall
@@ -2510,7 +2655,7 @@ public:
          return true;
      }
 
-     bool check_if_shaders_are_done() { // checks if all warps in the sm are stalled from extended buffer
+     bool check_if_shaders_are_done_warp_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
          for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
              //if(m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){
              if(m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id)){
@@ -2523,8 +2668,65 @@ public:
          return true;
      }
 
+     bool check_extended_buffer_stall_all_sch_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
+         for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
+             if (schedulers[sch_id]->m_extended_buffer_in_use) {
+                if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
+
+                }
+                else{ // case where warp is done but scheduler buffer not full so the stall flag isnt set
+                    bool warp_in_buffer;
+                    for(int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // checks in all buffer entries to see if any warp there is done
+                        for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+                            warp_in_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
+                            if(warp_in_buffer && (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()) || m_warp[warp_id].functional_done()){
+                                
+                            }
+                            else if(!warp_in_buffer){
+
+                            }
+                            else{
+                                return false;
+                            }
+                        }
+                    }
+                }
+             }
+         }
+         return true;
+     }
+
+     bool check_if_shaders_are_done_sch_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
+         for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
+             if (schedulers[sch_id]->m_extended_buffer_in_use) {
+                if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
+
+                }
+                else{ // case where warp is done but scheduler buffer not full
+                    bool warp_in_buffer;
+                    for(int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // checks in all buffer entries to see if any warp there is done
+                        for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
+                            warp_in_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
+                            if(warp_in_buffer && (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id))){
+                                
+                            }
+                            else if(!warp_in_buffer){
+                                
+                            }
+                            else{
+                                return false;
+                            }
+                        }
+                    }
+                }
+             }
+         }
+         return true;
+     }
+
     std::vector<shd_warp_t>   m_warp;   // per warp information array
     const shader_core_config *m_config;
+    std::vector<scheduler_unit*>  schedulers;
 
 	private:
 	 unsigned inactive_lanes_accesses_sfu(unsigned active_count,double latency){
@@ -2548,8 +2750,8 @@ public:
     friend class TwoLevelScheduler;
     friend class LooseRoundRobbinScheduler;
     bool issue_warp( register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id, unsigned sch_id );
-    void func_exec_inst( warp_inst_t &inst , unsigned warpId, const active_mask_t &active_mask);
-    void core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, const active_mask_t &active_mask, unsigned warpId =(unsigned)-1); // for atomic adds
+    void func_exec_inst( warp_inst_t &inst , unsigned warpId, const active_mask_t &active_mask, unsigned sch_id);
+    void core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, const active_mask_t &active_mask, unsigned sch_id, unsigned warpId =(unsigned)-1); // for atomic adds
 
      // Returns numbers of addresses in translated_addrs
     unsigned translate_local_memaddr( address_type localaddr, unsigned tid, unsigned num_shader, unsigned datasize, new_addr_type* translated_addrs );
@@ -2603,7 +2805,7 @@ public:
     int m_active_warps;
 
     //schedule
-    std::vector<scheduler_unit*>  schedulers;
+    //std::vector<scheduler_unit*>  schedulers; // moved to public
 
     //issue
     unsigned int Issue_Prio;
@@ -2692,8 +2894,10 @@ public:
     void get_icnt_stats(long &n_simt_to_mem, long &n_mem_to_simt) const;
     float get_current_occupancy( unsigned long long& active, unsigned long long & total ) const;
 
-    bool check_extended_buffer_stall();
-    bool check_everything_done_except_flush();
+    bool check_extended_buffer_stall_warp_level_buffer();
+    bool check_everything_done_except_flush_warp_level_buffer();
+    bool check_extended_buffer_stall_sch_level_buffer();
+    bool check_everything_done_except_flush_sch_level_buffer();
     int extended_buffer_flush_all();
     shader_core_ctx **m_core; // easier to implement buffer
     const shader_core_config *m_config; // easier to implement buffer

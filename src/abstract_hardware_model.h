@@ -1064,6 +1064,7 @@ public:
     void set_space(_memory_space_t type) { space.set_type(type); }
     void set_data_size(unsigned int size) { data_size = size; }
     void set_m_warp_id(unsigned int warp_id) { m_warp_id = warp_id; }
+    void set_m_scheduler_id(unsigned int sch_id) { m_scheduler_id = sch_id; }
     void set_memory_op(_memory_op_t type) { memory_op = type; }
     void set_out(unsigned int num) {
          out[0] = num;
@@ -1278,12 +1279,13 @@ protected:
 
     static unsigned sm_next_uid;
 
-    unsigned m_scheduler_id;  //the scheduler that issues this inst
+    //unsigned m_scheduler_id;  //the scheduler that issues this inst
 
     //Jin: cdp support
 public:
     int m_is_cdp;
     unsigned m_warp_id;
+    unsigned m_scheduler_id;  //the scheduler that issues this inst
     std::vector<per_thread_info> m_per_scalar_thread;
 };
 
