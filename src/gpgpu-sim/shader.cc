@@ -1269,9 +1269,9 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
         // check buffer to see if full or not
         //printf("####################### ISSUE_WARP #######################\n");
         //printf("Cycle: %d, warp id: %u, sch id: %u, m_thread: %u, buff locations remaining: %d, buff full: %d, full stall: %d\n", gpu_sim_cycle, warp_id, sch_id, m_thread, schedulers[sch_id]->extended_buffer_locations_remaining(), schedulers[sch_id]->extended_buffer_full(), schedulers[sch_id]->get_extended_buffer_full_stall());
-        /*if(schedulers[sch_id]->get_extended_buffer_full_stall()){
+        if(schedulers[sch_id]->get_extended_buffer_full_stall()){
             return false;
-        }*/    
+        }
         if(schedulers[sch_id]->extended_buffer_full()){
             schedulers[sch_id]->set_extended_buffer_full_stall();
             return false;
