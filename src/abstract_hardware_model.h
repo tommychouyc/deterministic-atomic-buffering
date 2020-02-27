@@ -981,6 +981,7 @@ public:
         m_cache_hit=false;
         m_is_printf=false;
         m_is_cdp = 0;
+        really_is_atomic = false;
     }
     /*warp_inst_t( const warp_inst_t& orig ){
         printf("copy constructor\n");
@@ -1246,6 +1247,7 @@ public:
     void print( FILE *fout ) const;
     unsigned get_uid() const { return m_uid; }
     unsigned get_schd_id() const { return m_scheduler_id; }
+    bool really_is_atomic;
 
 
 protected:

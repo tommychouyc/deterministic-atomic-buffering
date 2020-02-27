@@ -722,7 +722,7 @@ void ptx_instruction::set_opcode_and_latency()
    case BRA_OP: op = BRANCH_OP; break;
    case BREAKADDR_OP: op = BRANCH_OP; break;
    case TEX_OP: op = LOAD_OP; mem_op=TEX; break;
-   case ATOM_OP: op = ATOMIC_OP; break;
+   case ATOM_OP: {op = ATOMIC_OP; really_is_atomic = true; break;}
    case BAR_OP: op = BARRIER_OP; break;
    case SST_OP: op = BARRIER_OP; break;
    case MEMBAR_OP: op = MEMORY_BARRIER_OP; break;

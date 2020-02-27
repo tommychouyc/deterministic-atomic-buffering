@@ -811,6 +811,8 @@ enum concrete_scheduler
     CONCRETE_SCHEDULER_LRR = 0,
     CONCRETE_SCHEDULER_SRR,
     CONCRETE_SCHEDULER_GTO,
+    CONCRETE_SCHEDULER_GTRR,
+    CONCRETE_SCHEDULER_GTRTG,
     CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE,
     CONCRETE_SCHEDULER_WARP_LIMITING,
     CONCRETE_SCHEDULER_OLDEST_FIRST,
@@ -843,6 +845,10 @@ public:
     }
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.end();
+    }
+    virtual void verify_issue(const warp_inst_t *pI)
+    {
+
     }
 
 
@@ -1098,6 +1104,68 @@ public:
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.end();
     }
+};
+
+class gtrtg_scheduler : public scheduler_unit {
+public:
+	gtrtg_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+                    Scoreboard* scoreboard, simt_stack** simt,
+                    std::vector<shd_warp_t>* warp,
+                    register_set* sp_out,
+					register_set* dp_out,
+                    register_set* sfu_out,
+					register_set* int_out,
+                    register_set* tensor_core_out,
+                    register_set* mem_out,
+                    int id )
+	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id ){rr = false; kid = 0;}
+	virtual ~gtrtg_scheduler () {}
+	virtual void order_warps ();
+    virtual void done_adding_supervised_warps() {
+        m_last_supervised_issued = m_supervised_warps.begin();
+    }
+    void setrr(bool b);
+    
+    virtual void verify_issue(const warp_inst_t *pI )
+    {
+        // has to be in round robin mode to execute atomics and vice-versa
+        assert(rr == pI->really_is_atomic);
+    }
+
+    bool rr;
+    int kid;
+    int num_schedulers;
+    int sid;
+    std::vector<int> m_atomic_warps;
+};
+
+class gtrr_scheduler : public scheduler_unit {
+public:
+	gtrr_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+                    Scoreboard* scoreboard, simt_stack** simt,
+                    std::vector<shd_warp_t>* warp,
+                    register_set* sp_out,
+					register_set* dp_out,
+                    register_set* sfu_out,
+					register_set* int_out,
+                    register_set* tensor_core_out,
+                    register_set* mem_out,
+                    int id )
+	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id ){rr = false; kid = 0;}
+	virtual ~gtrr_scheduler () {}
+	virtual void order_warps ();
+    virtual void done_adding_supervised_warps() {
+        m_last_supervised_issued = m_supervised_warps.begin();
+    }
+    void setrr(bool b);
+
+    virtual void verify_issue(const warp_inst_t *pI )
+    {
+        // has to be in round robin mode to execute atomics
+        assert(!pI->really_is_atomic || rr);
+    }
+    bool rr;
+    int kid;
 };
 
 class lrr_scheduler : public scheduler_unit {

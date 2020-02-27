@@ -153,6 +153,8 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
 					 CONCRETE_SCHEDULER_OLDEST_FIRST :
                                          sched_config.find("warp_limiting") != std::string::npos ?
                                          CONCRETE_SCHEDULER_WARP_LIMITING: sched_config.find("srr") != std::string::npos ? CONCRETE_SCHEDULER_SRR :
+                                         sched_config.find("gtrr") != std::string::npos ? CONCRETE_SCHEDULER_GTRR :
+                                         sched_config.find("gtrtg") != std::string::npos ? CONCRETE_SCHEDULER_GTRTG : 
                                          NUM_CONCRETE_SCHEDULERS;
     assert ( scheduler != NUM_CONCRETE_SCHEDULERS );
     
@@ -162,6 +164,40 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
             case CONCRETE_SCHEDULER_SRR:
                 schedulers.push_back(
                     new srr_scheduler( m_stats,
+                                       this,
+                                       m_scoreboard,
+                                       m_simt_stack,
+                                       &m_warp,
+                                       &m_pipeline_reg[ID_OC_SP],
+									   &m_pipeline_reg[ID_OC_DP],
+                                       &m_pipeline_reg[ID_OC_SFU],
+									   &m_pipeline_reg[ID_OC_INT],
+                                       &m_pipeline_reg[ID_OC_TENSOR_CORE],
+                                       &m_pipeline_reg[ID_OC_MEM],
+                                       i
+                                     )
+                );
+                break;
+            case CONCRETE_SCHEDULER_GTRR:
+                schedulers.push_back(
+                    new gtrr_scheduler( m_stats,
+                                       this,
+                                       m_scoreboard,
+                                       m_simt_stack,
+                                       &m_warp,
+                                       &m_pipeline_reg[ID_OC_SP],
+									   &m_pipeline_reg[ID_OC_DP],
+                                       &m_pipeline_reg[ID_OC_SFU],
+									   &m_pipeline_reg[ID_OC_INT],
+                                       &m_pipeline_reg[ID_OC_TENSOR_CORE],
+                                       &m_pipeline_reg[ID_OC_MEM],
+                                       i
+                                     )
+                );
+                break;
+            case CONCRETE_SCHEDULER_GTRTG:
+                schedulers.push_back(
+                    new gtrtg_scheduler( m_stats,
                                        this,
                                        m_scoreboard,
                                        m_simt_stack,
@@ -1645,6 +1681,8 @@ bool scheduler_unit::cycle()
                         const active_mask_t &active_mask = m_simt_stack[warp_id]->get_active_mask();
                         assert( warp(warp_id).inst_in_pipeline() );
 
+                        verify_issue(pI);
+
                         if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP)||(pI->op==TENSOR_CORE_LOAD_OP)||(pI->op==TENSOR_CORE_STORE_OP) || (pI->op==ATOMIC_OP)) {
                         	if( m_mem_out->has_free(m_shader->m_config->sub_core_model, m_id) && (!diff_exec_units || previous_issued_inst_exec_type != exec_unit_type_t::MEM)) {
                                 if(m_shader->issue_warp(*m_mem_out,pI,active_mask,warp_id,m_id)){
@@ -1891,6 +1929,208 @@ void srr_scheduler::order_warps()
             m_next_cycle_prioritized_warps.push_back(*iter);
            break;
        }
+   }
+}
+
+void gtrr_scheduler::order_warps()
+{
+    int k_id = m_shader->get_kernel()->get_uid();
+    // new kernel
+    if (k_id != kid)
+    {
+        setrr(false);
+        kid = k_id;
+    }
+    if (rr)
+    {
+        m_next_cycle_prioritized_warps.clear();
+
+        std::vector<shd_warp_t*>::const_iterator iter = (m_last_supervised_issued == m_supervised_warps.end()) ? m_supervised_warps.begin() : (m_last_supervised_issued + 1);
+
+        for (int i = 0; i < m_supervised_warps.size(); i++, iter++)
+        {
+            // wrap around
+            if (iter == m_supervised_warps.end())
+            {
+                iter = m_supervised_warps.begin();
+            }
+            if (!((*iter)->done_exit()) && !m_shader->warp_waiting_at_barrier((*iter)->get_warp_id()) && !((*iter)->functional_done()))
+            {
+                m_next_cycle_prioritized_warps.push_back(*iter);
+                break;
+            }
+        }
+    }
+    else
+    {
+        order_by_priority( m_next_cycle_prioritized_warps,
+                       m_supervised_warps,
+                       m_last_supervised_issued,
+                       m_supervised_warps.size(),
+                       ORDERING_GREEDY_THEN_PRIORITY_FUNC,
+                       scheduler_unit::sort_warps_by_oldest_dynamic_id );
+        
+        bool atomic_found = false;
+        for (int i = 0; i < m_next_cycle_prioritized_warps.size(); i++)
+        {
+            if (m_next_cycle_prioritized_warps[i] == NULL)
+            {
+                m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                i--;
+            }
+            else
+            {
+                int wid = m_next_cycle_prioritized_warps[i]->get_warp_id();
+
+                if (wid == -1)
+                {
+                    m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                    i--;
+                }
+                else
+                {
+                    if (m_next_cycle_prioritized_warps[i]->done_exit() || m_next_cycle_prioritized_warps[i]->functional_done())
+                    {
+                        m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                        i--;
+                    }
+                    else
+                    {
+                        const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+                        if (pI != NULL && pI->really_is_atomic)
+                        {
+                            atomic_found = true;
+                            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                            i--;
+                        }
+                    }
+                }
+            }
+        }
+
+        // only atomics left, switch to SRR
+        if (m_next_cycle_prioritized_warps.size() == 0 && atomic_found)
+        {
+            setrr(true);
+
+            for (int i = 0; i < m_supervised_warps.size(); i++)
+            {
+                if (m_supervised_warps[i] != NULL)
+                {
+                    int wid = m_supervised_warps[i]->get_warp_id();
+
+                    if (wid != -1)
+                    {
+                        const warp_inst_t *pI = warp(m_supervised_warps[i]->get_warp_id()).ibuffer_next_inst();
+                    
+                        // should be atomics
+                        if (pI != NULL)
+                        {
+                            assert(pI->really_is_atomic);
+                            m_next_cycle_prioritized_warps.push_back(m_supervised_warps[i]);
+                        }
+                    }
+                }
+            }
+        }
+   }
+}
+    void gtrtg_scheduler::setrr(bool b)
+    {
+        //printf("SHADER %d SCH %d SETTING TO %d\n", m_shader->get_sid(), m_id, b);
+        rr = b;
+    }
+
+    void gtrr_scheduler::setrr(bool b)
+    {
+        //printf("SHADER %d SCH %d SETTING TO %d\n", m_shader->get_sid(), m_id, b);
+        rr = b;
+    }
+
+void gtrtg_scheduler::order_warps()
+{
+    if (!rr || (m_atomic_warps.size() == 1 && (*m_last_supervised_issued)->get_warp_id() == m_atomic_warps.front()))
+    {
+        if (rr)
+        {
+            m_atomic_warps.erase(m_atomic_warps.begin());
+            setrr(false);
+        }
+        order_by_priority( m_next_cycle_prioritized_warps,
+                       m_supervised_warps,
+                       m_last_supervised_issued,
+                       m_supervised_warps.size(),
+                       ORDERING_GREEDY_THEN_PRIORITY_FUNC,
+                       scheduler_unit::sort_warps_by_oldest_dynamic_id );
+
+        for (int i = 0; i < m_next_cycle_prioritized_warps.size(); i++)
+        {
+            if (m_next_cycle_prioritized_warps[i] == NULL)
+            {
+                m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                i--;
+            }
+            else
+            {
+                int wid = m_next_cycle_prioritized_warps[i]->get_warp_id();
+
+                if (wid == -1)
+                {
+                    m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                    i--;
+                }
+                else
+                {
+                    if (m_next_cycle_prioritized_warps[i]->done_exit() || m_next_cycle_prioritized_warps[i]->functional_done())
+                    {
+                        m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                        i--;
+                    }
+                    else
+                    {
+                        const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+                        if (pI != NULL && pI->really_is_atomic)
+                        {
+                            m_atomic_warps.push_back(wid);
+                            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                            i--;
+                        }
+                    }
+                }
+            }
+        }
+
+        // only atomics left, switch to SRR
+        if (m_next_cycle_prioritized_warps.size() == 0)
+        {
+            sort(m_atomic_warps.begin(), m_atomic_warps.end());
+
+            if (!m_atomic_warps.empty())
+            {
+                setrr(true);
+                m_next_cycle_prioritized_warps.push_back(&warp(m_atomic_warps.front()));
+            }
+        }
+        else
+        {
+            m_atomic_warps.clear();
+        }
+   }
+   else
+   {
+        m_next_cycle_prioritized_warps.clear();
+        if ((*m_last_supervised_issued)->get_warp_id() == m_atomic_warps.front())
+        {
+           m_atomic_warps.erase(m_atomic_warps.begin());
+        }
+        assert(m_atomic_warps.size());
+
+        int wid = m_atomic_warps.front();
+        const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+        assert(pI->really_is_atomic);
+
+        m_next_cycle_prioritized_warps.push_back(&warp(m_atomic_warps.front()));
+        assert(m_next_cycle_prioritized_warps.size() == 1);
    }
 }
 
