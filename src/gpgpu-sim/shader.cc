@@ -53,6 +53,7 @@
 #define MIN(a,b) (((a)<(b))?(a):(b))
     
 extern gpgpu_sim* g_the_gpu; 
+extern int num_buffer_entries;
 /////////////////////////////////////////////////////////////////////////////
 
 std::list<unsigned> shader_core_ctx::get_regs_written( const inst_t &fvt ) const
@@ -135,7 +136,7 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
     
     m_warp.resize(m_config->max_warps_per_shader, shd_warp_t(this, warp_size));
     for(unsigned i = 0; i < m_config->max_warps_per_shader; i++){
-        m_warp[i].m_extended_buffer = new extended_buffer();
+        m_warp[i].m_extended_buffer = new extended_buffer(num_buffer_entries);
     }
 
     m_scoreboard = new Scoreboard(m_sid, m_config->max_warps_per_shader);

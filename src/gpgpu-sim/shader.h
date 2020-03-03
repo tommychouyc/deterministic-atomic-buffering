@@ -54,7 +54,6 @@
 #include "gpu-cache.h"
 #include "traffic_breakdown.h"
 
-
 #define NO_OP_FLAG            0xFF
 
 /* READ_PACKET_SIZE:
@@ -69,6 +68,7 @@
 
 #define WRITE_MASK_SIZE 8
 extern gpgpu_sim* g_the_gpu; 
+extern int num_buffer_entries;
 
 enum exec_unit_type_t
 {
@@ -97,8 +97,8 @@ public:
 
 class extended_buffer {
 public:
-    extended_buffer(){
-        for(int i = 0; i<32; i++){
+    extended_buffer(int size){
+        for(int i = 0; i<size; i++){
             address_list.push_back(0);
             buffer.push_back(0);
             flushed.push_back(false);
@@ -775,7 +775,7 @@ public:
     bool m_extended_buffer_in_use;
     bool m_extended_buffer_freshly_initialied;
 
-    static const unsigned extended_buffer_num_entries=32; // how many addresses we can store
+    unsigned extended_buffer_num_entries=num_buffer_entries; // how many addresses we can store
     static const unsigned extended_buffer_buff_size=8; // how long the buffer is
 };
 
@@ -834,7 +834,7 @@ public:
         : m_supervised_warps(), m_stats(stats), m_shader(shader),
         m_scoreboard(scoreboard), m_simt_stack(simt), /*m_pipeline_reg(pipe_regs),*/ m_warp(warp),
         m_sp_out(sp_out),m_dp_out(dp_out),m_sfu_out(sfu_out),m_int_out(int_out),m_tensor_core_out(tensor_core_out),m_mem_out(mem_out), m_id(id){
-        m_extended_buffer = new extended_buffer();
+        m_extended_buffer = new extended_buffer(num_buffer_entries);
         m_extended_buffer_full_stall = false;
         m_extended_buffer_in_use = false;
         m_extended_buffer_freshly_initialied = true;
@@ -895,8 +895,8 @@ public:
     bool m_extended_buffer_full_stall;
     bool m_extended_buffer_in_use;
     bool m_extended_buffer_freshly_initialied;
-    static const unsigned extended_buffer_num_entries=32; // how many addresses we can store
-    static const unsigned extended_buffer_buff_size=8; // how long the buffer is
+    unsigned extended_buffer_num_entries = num_buffer_entries; // how many addresses we can store
+    static const unsigned extended_buffer_buff_size = 8; // how long the buffer is
 
     bool get_extended_buffer_full_stall() { return m_extended_buffer_full_stall; }
     void set_extended_buffer_full_stall() { m_extended_buffer_full_stall = true; }
@@ -2276,6 +2276,7 @@ struct shader_core_config : public core_config
 
     bool adpative_volta_cache_config;
 
+    int gpgpu_buffer_entry_size;
 };
 
 struct shader_core_stats_pod {

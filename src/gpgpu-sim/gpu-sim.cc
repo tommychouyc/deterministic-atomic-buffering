@@ -116,6 +116,8 @@ tr1_hash_map<new_addr_type,unsigned> address_random_interleaving;
 
 #include "mem_latency_stat.h"
 
+int num_buffer_entries;
+
 void power_config::reg_options(class OptionParser * opp)
 {
 
@@ -478,6 +480,10 @@ void shader_core_config::reg_options(class OptionParser * opp)
     option_parser_register(opp, "-gpgpu_concurrent_kernel_sm", OPT_BOOL, &gpgpu_concurrent_kernel_sm, 
                 "Support concurrent kernels on a SM (default = disabled)", 
                 "0");
+
+    option_parser_register(opp, "-num_buffer_entries", OPT_INT32, &num_buffer_entries,
+                            "Number of entries in each buffer (default=32)",
+                            "32");
 
 }
 
