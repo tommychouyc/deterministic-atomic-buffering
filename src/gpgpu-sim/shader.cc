@@ -54,6 +54,7 @@
     
 extern gpgpu_sim* g_the_gpu; 
 extern int num_buffer_entries;
+extern int flush_chunk_size;
 /////////////////////////////////////////////////////////////////////////////
 
 std::list<unsigned> shader_core_ctx::get_regs_written( const inst_t &fvt ) const
@@ -156,6 +157,7 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
                                          CONCRETE_SCHEDULER_WARP_LIMITING: sched_config.find("srr") != std::string::npos ? CONCRETE_SCHEDULER_SRR :
                                          sched_config.find("gtrr") != std::string::npos ? CONCRETE_SCHEDULER_GTRR :
                                          sched_config.find("gtrtg") != std::string::npos ? CONCRETE_SCHEDULER_GTRTG : 
+                                         sched_config.find("gtsg") != std::string::npos ? CONCRETE_SCHEDULER_GTSG : 
                                          NUM_CONCRETE_SCHEDULERS;
     assert ( scheduler != NUM_CONCRETE_SCHEDULERS );
     
@@ -199,6 +201,23 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
             case CONCRETE_SCHEDULER_GTRTG:
                 schedulers.push_back(
                     new gtrtg_scheduler( m_stats,
+                                       this,
+                                       m_scoreboard,
+                                       m_simt_stack,
+                                       &m_warp,
+                                       &m_pipeline_reg[ID_OC_SP],
+									   &m_pipeline_reg[ID_OC_DP],
+                                       &m_pipeline_reg[ID_OC_SFU],
+									   &m_pipeline_reg[ID_OC_INT],
+                                       &m_pipeline_reg[ID_OC_TENSOR_CORE],
+                                       &m_pipeline_reg[ID_OC_MEM],
+                                       i
+                                     )
+                );
+                break;
+            case CONCRETE_SCHEDULER_GTSG:
+                schedulers.push_back(
+                    new gtsg_scheduler( m_stats,
                                        this,
                                        m_scoreboard,
                                        m_simt_stack,
@@ -499,7 +518,7 @@ void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread, bool re
    }
 }
 
-void shader_core_ctx::init_warps( unsigned cta_id, unsigned start_thread, unsigned end_thread, unsigned ctaid, int cta_size, unsigned kernel_id )
+void shader_core_ctx::init_warps( unsigned cta_id, unsigned start_thread, unsigned end_thread, unsigned ctaid, int cta_size, unsigned kernel_id, unsigned dynamic_cta_id )
 {
     address_type start_pc = next_pc(start_thread);
     if (m_config->model == POST_DOMINATOR) {
@@ -534,7 +553,7 @@ void shader_core_ctx::init_warps( unsigned cta_id, unsigned start_thread, unsign
                 start_pc=pc;
               }
                
-            m_warp[i].init(start_pc,cta_id,i,active_threads, m_dynamic_warp_id);
+            m_warp[i].init(start_pc,cta_id,i,active_threads, m_dynamic_warp_id, dynamic_cta_id);
             ++m_dynamic_warp_id;
             m_not_completed += n_active;
             ++m_active_warps;
@@ -1048,8 +1067,16 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         //printf("Warp: %d, Nothing to flush\n", warpId);
         return 0;
     }
+    int max_flush = flush_chunk_size; // set chunk size here
+    int new_count;
+    if(count >= max_flush){
+        new_count = max_flush;
+    }
+    else{
+        new_count = count;
+    }
 
-    if(m_icnt->full(40*count,true)){ // used to be just 32, 40 is flit size
+    if(m_icnt->full(40*new_count,true)){ // used to be just 32, 40 is flit size
         //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
         return -2;
     }
@@ -1106,6 +1133,10 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             // Slot cleared in ldst writeback
             schedulers[sch_id]->m_extended_buffer->flushed[i] = true;
             slots_flushed++;
+        }
+        if(slots_flushed >= max_flush){ // to support flushing in chunks
+            //printf("Flushed %d entries, %d left to flush\n", max_flush, count - max_flush);
+            break;
         }
     }
 
@@ -1311,6 +1342,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
         }
         if(schedulers[sch_id]->extended_buffer_full()){
             schedulers[sch_id]->set_extended_buffer_full_stall();
+            //printf("Stall %d\n", gpu_sim_cycle);
             return false;
         }
         // see what locations the atomic will write to
@@ -1346,7 +1378,8 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
         }
         // see if there's enough space in the buffer
         if(schedulers[sch_id]->extended_buffer_locations_remaining() < diff_addrs.size()){
-            schedulers[sch_id]->set_extended_buffer_full_stall(); // newly added
+            schedulers[sch_id]->set_extended_buffer_full_stall();
+            //printf("Stall %d\n", gpu_sim_cycle);
             return false; // not enough space
         }
         //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), schedulers[sch_id]->extended_buffer_locations_remaining());
@@ -1682,7 +1715,7 @@ bool scheduler_unit::cycle()
                         const active_mask_t &active_mask = m_simt_stack[warp_id]->get_active_mask();
                         assert( warp(warp_id).inst_in_pipeline() );
 
-                        verify_issue(pI);
+                        verify_issue(pI, warp_id);
 
                         if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP)||(pI->op==TENSOR_CORE_LOAD_OP)||(pI->op==TENSOR_CORE_STORE_OP) || (pI->op==ATOMIC_OP)) {
                         	if( m_mem_out->has_free(m_shader->m_config->sub_core_model, m_id) && (!diff_exec_units || previous_issued_inst_exec_type != exec_unit_type_t::MEM)) {
@@ -1816,58 +1849,29 @@ bool scheduler_unit::cycle()
 
         std::string sched_config = m_shader->m_config->gpgpu_scheduler_string;
         bool srr = sched_config.find("srr") != std::string::npos;
-        if(srr){
-            if ( issued || issue_warp_didnt_issue) {
-            //if ( issued ) {
-                // This might be a bit inefficient, but we need to maintain
-                // two ordered list for proper scheduler execution.
-                // We could remove the need for this loop by associating a
-                // supervised_is index with each entry in the m_next_cycle_prioritized_warps
-                // vector. For now, just run through until you find the right warp_id
-                for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
-                    supervised_iter != m_supervised_warps.end();
-                    ++supervised_iter ) {
-                    if ( *iter == *supervised_iter ) {
-                        m_last_supervised_issued = supervised_iter;
-                    }
+        if ( issued ) {
+            // This might be a bit inefficient, but we need to maintain
+            // two ordered list for proper scheduler execution.
+            // We could remove the need for this loop by associating a
+            // supervised_is index with each entry in the m_next_cycle_prioritized_warps
+            // vector. For now, just run through until you find the right warp_id
+            for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
+                supervised_iter != m_supervised_warps.end();
+                ++supervised_iter ) {
+                if ( *iter == *supervised_iter ) {
+                    m_last_supervised_issued = supervised_iter;
                 }
-
-                if(issued == 1)
-                    m_stats->single_issue_nums[m_id]++;
-                else if(issued > 1)
-                    m_stats->dual_issue_nums[m_id]++;
-                else if (!issue_warp_didnt_issue)
-                //else
-                    abort();   //issued should be > 0
-
-                break;
             }
+
+            if(issued == 1)
+                m_stats->single_issue_nums[m_id]++;
+            else if(issued > 1)
+                m_stats->dual_issue_nums[m_id]++;
+            else
+                abort();   //issued should be > 0
+
+            break;
         }
-        else{
-            if ( issued ) {
-                // This might be a bit inefficient, but we need to maintain
-                // two ordered list for proper scheduler execution.
-                // We could remove the need for this loop by associating a
-                // supervised_is index with each entry in the m_next_cycle_prioritized_warps
-                // vector. For now, just run through until you find the right warp_id
-                for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
-                    supervised_iter != m_supervised_warps.end();
-                    ++supervised_iter ) {
-                    if ( *iter == *supervised_iter ) {
-                        m_last_supervised_issued = supervised_iter;
-                    }
-                }
-
-                if(issued == 1)
-                    m_stats->single_issue_nums[m_id]++;
-                else if(issued > 1)
-                    m_stats->dual_issue_nums[m_id]++;
-                else
-                    abort();   //issued should be > 0
-
-                break;
-            }
-        } 
     }
 
     // issue stall statistics:
@@ -1912,37 +1916,121 @@ bool scheduler_unit::sort_warps_by_oldest_dynamic_id(shd_warp_t* lhs, shd_warp_t
     }
 }
 
-void srr_scheduler::order_warps()
+void srr_scheduler::setrr(bool b)
 {
-   m_next_cycle_prioritized_warps.clear();
-
-   std::vector<shd_warp_t*>::const_iterator iter = (m_last_supervised_issued == m_supervised_warps.end()) ? m_supervised_warps.begin() : (m_last_supervised_issued + 1);
-
-   for (int i = 0; i < m_supervised_warps.size(); i++, iter++)
-   {
-       // wrap around
-       if (iter == m_supervised_warps.end())
-       {
-           iter = m_supervised_warps.begin();
-       }
-       if (!((*iter)->done_exit()) && !m_shader->warp_waiting_at_barrier((*iter)->get_warp_id()) && !((*iter)->functional_done()))
-       {
-            m_next_cycle_prioritized_warps.push_back(*iter);
-           break;
-       }
-   }
+    rr = b;
 }
 
-void gtrr_scheduler::order_warps()
+void srr_scheduler::do_on_warp_issued( unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
 {
-    int k_id = m_shader->get_kernel()->get_uid();
-    // new kernel
-    if (k_id != kid)
+    m_stats->event_warp_issued( m_shader->get_sid(),
+                                warp_id,
+                                num_issued,
+                                warp(warp_id).get_dynamic_warp_id() );
+
+    if (blocking)
     {
-        setrr(false);
-        kid = k_id;
+        if (exec_barriers)
+        {
+            int index = warp_id/4;
+            assert(barrier_warps[index]);
+            barrier_warps.reset(index);
+
+            if (barrier_warps.count() == 0)
+            {
+                exec_barriers = false;
+            }
+        }
     }
-    if (rr)
+    
+    warp(warp_id).ibuffer_step();
+}
+
+void srr_scheduler::get_next_rr_warp(
+    std::vector<shd_warp_t*>::const_iterator& warp_to_check,
+    std::vector<shd_warp_t*>& considered_warps,
+    std::bitset<16>        warp_mask,
+    std::vector<shd_warp_t*>& next_cycle_warp 
+    )
+{
+    std::vector<shd_warp_t*>::const_iterator first = m_supervised_warps.begin();
+
+    int start = std::distance(first, warp_to_check);
+
+    for (int i = 0; i < considered_warps.size(); i++)
+    {
+         // wrap around
+        int index = (start + i)%16;
+        
+        if (warp_mask[index] && !(m_supervised_warps[index]->done_exit()) && !(m_supervised_warps[index]->functional_done()))
+        {
+            //assert(!m_shader->warp_waiting_at_barrier(m_supervised_warps[index]->get_warp_id()));
+            next_cycle_warp.push_back(m_supervised_warps[index]);
+            break;
+        }
+    }
+}
+
+void srr_scheduler::set_blocking()
+{
+    std::string sched_config = m_shader->get_config()->gpgpu_scheduler_string;
+    blocking = (sched_config.find("blocking") != std::string::npos);
+}
+
+void srr_scheduler::order_warps()
+{   
+    m_next_cycle_prioritized_warps.clear();
+    if (blocking)
+    {
+        std::vector<shd_warp_t*>::const_iterator iter = (m_last_supervised_issued == m_supervised_warps.end()) ? m_supervised_warps.begin() : (m_last_supervised_issued + 1);
+        
+        if (barrier_warps.count() > 0)
+        {
+            assert(exec_barriers);
+            get_next_rr_warp(iter, m_supervised_warps, barrier_warps, m_next_cycle_prioritized_warps);
+        }
+        else
+        {
+            if (exec_barriers)
+            {
+                exec_barriers = false;
+            }
+
+            // filter out warps with barriers
+            warps_to_consider.reset();
+            barrier_warps.reset();
+            for (int i = 0; i < m_supervised_warps.size(); i++)
+            {
+                int wid = (m_supervised_warps[i])->get_warp_id();
+                if (!m_supervised_warps[i]->done_exit() && !m_supervised_warps[i]->functional_done() && wid != -1)
+                {
+                    const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+
+                    // if next inst is not fetched yet, or next inst is not a barrier
+                    if (pI == NULL || pI->op != BARRIER_OP)
+                    {
+                        warps_to_consider.set(i);
+                    }
+                    else
+                    {
+                        barrier_warps.set(i);
+                    }
+                }
+            }
+            //assert(warps_to_consider^barrier_warps == 0xFFFF);
+            if (warps_to_consider.count())
+            {
+                get_next_rr_warp(iter, m_supervised_warps, warps_to_consider, m_next_cycle_prioritized_warps);
+                barrier_warps.reset();
+            }       
+            else if (barrier_warps.count())
+            {
+                get_next_rr_warp(iter, m_supervised_warps, barrier_warps, m_next_cycle_prioritized_warps);
+                exec_barriers = true;
+            }
+        }
+    }
+    else
     {
         m_next_cycle_prioritized_warps.clear();
 
@@ -1955,6 +2043,10 @@ void gtrr_scheduler::order_warps()
             {
                 iter = m_supervised_warps.begin();
             }
+            if ((*iter)->get_warp_id() != -1 && m_shader->warp_waiting_at_barrier((*iter)->get_warp_id()))
+            {
+                skipping_bar++;
+            }
             if (!((*iter)->done_exit()) && !m_shader->warp_waiting_at_barrier((*iter)->get_warp_id()) && !((*iter)->functional_done()))
             {
                 m_next_cycle_prioritized_warps.push_back(*iter);
@@ -1962,8 +2054,126 @@ void gtrr_scheduler::order_warps()
             }
         }
     }
+}
+
+void gtrr_scheduler::do_on_warp_issued( unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
+{
+    m_stats->event_warp_issued( m_shader->get_sid(),
+                                warp_id,
+                                num_issued,
+                                warp(warp_id).get_dynamic_warp_id() );
+
+    if (blocking)
+    {
+        if (rr && exec_barriers)
+        {
+            int index = warp_id/4;
+            assert(barrier_warps[index]);
+            barrier_warps.reset(index);
+
+            if (barrier_warps.count() == 0)
+            {
+                exec_barriers = false;
+            }
+        }
+    }
+    
+    warp(warp_id).ibuffer_step();
+}
+
+void gtrr_scheduler::order_warps()
+{
+    
+    int k_id = m_shader->get_kernel()->get_uid();
+    // new kernel
+    if (k_id != kid)
+    {
+        setrr(false);
+        kid = k_id;
+    }
+    m_next_cycle_prioritized_warps.clear();
+
+    if (rr)
+    {
+        if (!blocking)
+        {
+            std::vector<shd_warp_t*>::const_iterator iter = (m_last_supervised_issued == m_supervised_warps.end()) ? m_supervised_warps.begin() : (m_last_supervised_issued + 1);
+    
+            for (int i = 0; i < m_supervised_warps.size(); i++, iter++)
+            {
+                // wrap around
+                if (iter == m_supervised_warps.end())
+                {
+                    iter = m_supervised_warps.begin();
+                }
+                if ((*iter)->get_warp_id() != -1 && m_shader->warp_waiting_at_barrier((*iter)->get_warp_id()))
+                {
+                    skipping_bar++;
+                }
+                if (!((*iter)->done_exit()) && !m_shader->warp_waiting_at_barrier((*iter)->get_warp_id()) && !((*iter)->functional_done()))
+                {
+                    m_next_cycle_prioritized_warps.push_back(*iter);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            std::vector<shd_warp_t*>::const_iterator iter = (m_last_supervised_issued == m_supervised_warps.end()) ? m_supervised_warps.begin() : (m_last_supervised_issued + 1);
+
+            if (barrier_warps.count() > 0)
+            {
+                assert(exec_barriers);
+                get_next_rr_warp(iter, m_supervised_warps, barrier_warps, m_next_cycle_prioritized_warps);
+            }
+            else
+            {
+                if (exec_barriers)
+                {
+                    exec_barriers = false;
+                }
+
+                // filter out warps with barriers
+                warps_to_consider.reset();
+                barrier_warps.reset();
+                for (int i = 0; i < m_supervised_warps.size(); i++)
+                {
+                    int wid = (m_supervised_warps[i])->get_warp_id();
+                    if (!m_supervised_warps[i]->done_exit() && !m_supervised_warps[i]->functional_done() && wid != -1)
+                    {
+                        const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+
+                        // if next inst is not fetched yet, or next inst is not a barrier
+                        if (pI == NULL || pI->op != BARRIER_OP)
+                        {
+                            warps_to_consider.set(i);
+                        }
+                        else
+                        {
+                            barrier_warps.set(i);
+                        }
+                    }
+                }
+                //assert(warps_to_consider^barrier_warps == 0xFFFF);
+                if (warps_to_consider.count())
+                {
+                    get_next_rr_warp(iter, m_supervised_warps, warps_to_consider, m_next_cycle_prioritized_warps);
+                    barrier_warps.reset();
+                }       
+                else if (barrier_warps.count())
+                {
+                    get_next_rr_warp(iter, m_supervised_warps, barrier_warps, m_next_cycle_prioritized_warps);
+                    exec_barriers = true;
+                }
+            }
+            tot_cycles_in_rr++;
+            cycles_in_rr++;
+        }
+    }
     else
     {
+        tot_cycles_in_gto++;
+        cycles_in_gto++;
         order_by_priority( m_next_cycle_prioritized_warps,
                        m_supervised_warps,
                        m_last_supervised_issued,
@@ -1983,27 +2193,19 @@ void gtrr_scheduler::order_warps()
             {
                 int wid = m_next_cycle_prioritized_warps[i]->get_warp_id();
 
-                if (wid == -1)
+                if (wid == -1 || m_next_cycle_prioritized_warps[i]->done_exit() || m_next_cycle_prioritized_warps[i]->functional_done())
                 {
                     m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
                     i--;
                 }
                 else
                 {
-                    if (m_next_cycle_prioritized_warps[i]->done_exit() || m_next_cycle_prioritized_warps[i]->functional_done())
+                    const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+                    if (pI != NULL && pI->really_is_atomic)
                     {
+                        atomic_found = true;
                         m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
                         i--;
-                    }
-                    else
-                    {
-                        const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
-                        if (pI != NULL && pI->really_is_atomic)
-                        {
-                            atomic_found = true;
-                            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
-                            i--;
-                        }
                     }
                 }
             }
@@ -2014,6 +2216,7 @@ void gtrr_scheduler::order_warps()
         {
             setrr(true);
 
+            // find warp with atomic inst and lowest wid and use that as starting point of rr
             for (int i = 0; i < m_supervised_warps.size(); i++)
             {
                 if (m_supervised_warps[i] != NULL)
@@ -2022,7 +2225,7 @@ void gtrr_scheduler::order_warps()
 
                     if (wid != -1)
                     {
-                        const warp_inst_t *pI = warp(m_supervised_warps[i]->get_warp_id()).ibuffer_next_inst();
+                        const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
                     
                         // should be atomics
                         if (pI != NULL)
@@ -2036,27 +2239,39 @@ void gtrr_scheduler::order_warps()
         }
    }
 }
-    void gtrtg_scheduler::setrr(bool b)
-    {
-        //printf("SHADER %d SCH %d SETTING TO %d\n", m_shader->get_sid(), m_id, b);
-        rr = b;
-    }
 
-    void gtrr_scheduler::setrr(bool b)
+void gtrtg_scheduler::setrr(bool b)
+{
+    // printf("SHADER %d SCH %d SETTING TO %d\n", m_shader->get_sid(), m_id, b);
+    rr = b;
+}
+
+void gtrtg_scheduler::do_on_warp_issued( unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
+{
+    m_stats->event_warp_issued( m_shader->get_sid(),
+                                warp_id,
+                                num_issued,
+                                warp(warp_id).get_dynamic_warp_id() );
+
+    if (rr)
     {
-        //printf("SHADER %d SCH %d SETTING TO %d\n", m_shader->get_sid(), m_id, b);
-        rr = b;
+        assert(warp_id == m_atomic_warps.front());
+        m_atomic_warps.erase(m_atomic_warps.begin());
+
+        if (m_atomic_warps.size() == 0)
+        {
+            setrr(false);
+        }
     }
+    
+    warp(warp_id).ibuffer_step();
+}
+
 
 void gtrtg_scheduler::order_warps()
 {
-    if (!rr || (m_atomic_warps.size() == 1 && (*m_last_supervised_issued)->get_warp_id() == m_atomic_warps.front()))
+    if (!rr)
     {
-        if (rr)
-        {
-            m_atomic_warps.erase(m_atomic_warps.begin());
-            setrr(false);
-        }
         order_by_priority( m_next_cycle_prioritized_warps,
                        m_supervised_warps,
                        m_last_supervised_issued,
@@ -2120,10 +2335,6 @@ void gtrtg_scheduler::order_warps()
    else
    {
         m_next_cycle_prioritized_warps.clear();
-        if ((*m_last_supervised_issued)->get_warp_id() == m_atomic_warps.front())
-        {
-           m_atomic_warps.erase(m_atomic_warps.begin());
-        }
         assert(m_atomic_warps.size());
 
         int wid = m_atomic_warps.front();
@@ -2131,7 +2342,177 @@ void gtrtg_scheduler::order_warps()
         assert(pI->really_is_atomic);
 
         m_next_cycle_prioritized_warps.push_back(&warp(m_atomic_warps.front()));
-        assert(m_next_cycle_prioritized_warps.size() == 1);
+   }
+}
+
+void gtsg_scheduler::setrr(bool b)
+{
+    //printf("SHADER %d SCH %d SETTING TO %d\n", m_shader->get_sid(), m_id, b);
+    rr = b;
+}
+
+void gtsg_scheduler::do_on_warp_issued(unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
+{
+    m_stats->event_warp_issued( m_shader->get_sid(),
+                                warp_id,
+                                num_issued,
+                                warp(warp_id).get_dynamic_warp_id() );
+    if (rr)
+    {
+        if (warp_id == m_atomic_warps.front()->get_warp_id())
+        {
+            m_atomic_warps.erase(m_atomic_warps.begin());
+            
+            if (m_atomic_warps.size() == 0)
+            {
+                setrr(false);
+            }
+        }
+    }
+    
+    warp(warp_id).ibuffer_step();
+}
+
+bool sort_by_wid(shd_warp_t* i, shd_warp_t* j)
+{
+    return (i->get_warp_id() < j->get_warp_id());
+}
+
+void gtsg_scheduler::order_warps()
+{
+    // TODO find better way to do this
+    int k_id = m_shader->get_kernel()->get_uid();
+    // new kernel
+    if (k_id != kid)
+    {
+        for (int i = 0; i < m_supervised_warps.size(); i++)
+        {
+            m_supervised_warps[i]->m_warps_exec = 0;
+            m_prev[i] = -1;
+        }
+        kid = k_id;
+    }
+
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        if (m_supervised_warps[i]->m_dynamic_cta_id != m_prev[i])
+        {
+            m_prev[i] = m_supervised_warps[i]->m_dynamic_cta_id;
+            m_supervised_warps[i]->m_warps_exec++;
+        }
+    }
+    
+    if (!rr)
+    {
+        order_by_priority( m_next_cycle_prioritized_warps,
+                       m_supervised_warps,
+                       m_last_supervised_issued,
+                       m_supervised_warps.size(),
+                       ORDERING_GREEDY_THEN_PRIORITY_FUNC,
+                       scheduler_unit::sort_warps_by_oldest_dynamic_id );
+
+        for (int i = 0; i < m_next_cycle_prioritized_warps.size(); i++)
+        {
+            if (m_next_cycle_prioritized_warps[i] == NULL)
+            {
+                m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                i--;
+            }
+            else
+            {
+                int wid = m_next_cycle_prioritized_warps[i]->get_warp_id();
+
+                if (wid == -1)
+                {
+                    m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                    i--;
+                }
+                else
+                {
+                    if (m_next_cycle_prioritized_warps[i]->done_exit() || m_next_cycle_prioritized_warps[i]->functional_done())
+                    {
+                        m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                        i--;
+                    }
+                    else
+                    {
+                        const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+                        if (pI != NULL && pI->really_is_atomic)
+                        {
+                            m_atomic_warps.push_back(m_next_cycle_prioritized_warps[i]);
+                            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                            i--;
+                        }
+                    }
+                }
+            }
+        }
+
+        // only atomics left, switch to SRR
+        if (m_next_cycle_prioritized_warps.size() == 0)
+        {
+            unsigned lowest_exec = (0xffffffff);
+
+            for (int i = 0; i < m_supervised_warps.size(); i++)
+            {
+                if (m_supervised_warps[i]->m_warps_exec != 0 && !m_supervised_warps[i]->done_exit() && m_supervised_warps[i]->m_warps_exec < lowest_exec)
+                {
+                    lowest_exec = m_supervised_warps[i]->m_warps_exec;
+                }
+            }
+
+            for (int i = 0; i < m_atomic_warps.size(); i++)
+            {
+                assert(lowest_exec != INT_MAX);
+                if (m_atomic_warps[i]->m_warps_exec != lowest_exec)
+                {
+                    assert(m_atomic_warps[i]->m_warps_exec > lowest_exec);
+                    m_atomic_warps.erase(m_atomic_warps.begin() + i);
+                    i--;
+                    passed_atomic++;
+                }
+            }
+
+            sort(m_atomic_warps.begin(), m_atomic_warps.end(), sort_by_wid);
+
+            if (!m_atomic_warps.empty())
+            {
+                setrr(true);
+                m_next_cycle_prioritized_warps.push_back(m_atomic_warps.front());
+            }
+        }
+        else
+        {
+            m_atomic_warps.clear();
+        }
+   }
+   else
+   {
+        m_next_cycle_prioritized_warps.clear();
+        assert(m_atomic_warps.size());
+
+        int atom_wid = m_atomic_warps.front()->get_warp_id();
+        const warp_inst_t *pI = warp(atom_wid).ibuffer_next_inst();
+        assert(pI->really_is_atomic);
+
+        m_next_cycle_prioritized_warps.push_back(m_atomic_warps.front());
+
+        for (int i = 0; i < m_supervised_warps.size(); i++)
+        {
+            if (m_supervised_warps[i] != NULL)
+            {
+                int wid = m_supervised_warps[i]->get_warp_id();
+
+                if (wid >= 0 && wid != atom_wid && !m_supervised_warps[i]->done_exit() && !m_supervised_warps[i]->functional_done())
+                {
+                    const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+                    if (pI != NULL && !pI->really_is_atomic)
+                    {
+                        m_next_cycle_prioritized_warps.push_back(m_supervised_warps[i]);
+                    }
+                }
+            }
+        }
    }
 }
 

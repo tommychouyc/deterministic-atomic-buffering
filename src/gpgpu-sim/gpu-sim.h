@@ -566,6 +566,8 @@ public:
    int core_to_flush_for_stall;
    int warp_to_flush_for_stall;
    int sch_to_flush_for_stall;
+   int chunk_to_flush_for_stall;
+   int long_flushing_counter_for_stall;
 
    // for kernel exit flush
    int flushing_counter; // mod this number to find cluster, core, and warp id
@@ -573,6 +575,8 @@ public:
    int core_to_flush;
    int warp_to_flush;
    int sch_to_flush;
+   int chunk_to_flush;
+   int long_flushing_counter;
    int m_extended_buffer_flush_reqs;
 
    // buffer flush stats

@@ -2044,8 +2044,8 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
 
    if ( shared_memory_lookup.find(sm_idx) == shared_memory_lookup.end() ) {
       if ( g_debug_execution >= 1 ) {
-         printf("  <CTA alloc> : sm_idx=%u sid=%u max_cta_per_sm=%u\n", 
-                sm_idx, sid, max_cta_per_sm );
+         printf("  <CTA alloc> : sm_idx=%u sid=%u max_cta_per_sm=%u Next CTA=%u (%u total CTAs) (%u)\n", 
+                sm_idx, sid, max_cta_per_sm, kernel.get_next_cta_id_single(), kernel.num_blocks(), gpu_sim_cycle);
       }
       char buf[512];
       snprintf(buf,512,"shared_%u", sid);
@@ -2058,8 +2058,8 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
       ptx_cta_lookup[sm_idx] = cta_info;
    } else {
       if ( g_debug_execution >= 1 ) {
-         printf("  <CTA realloc> : sm_idx=%u sid=%u max_cta_per_sm=%u\n", 
-                sm_idx, sid, max_cta_per_sm );
+         printf("  <CTA realloc> : sm_idx=%u sid=%u max_cta_per_sm=%u Next CTA=%u (%u total CTAs) (%u)\n", 
+                sm_idx, sid, max_cta_per_sm, kernel.get_next_cta_id_single(), kernel.num_blocks(), gpu_sim_cycle);
       }
       shared_mem = shared_memory_lookup[sm_idx];
       sstarr_mem = sstarr_memory_lookup[sm_idx];

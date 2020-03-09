@@ -69,6 +69,7 @@
 #define WRITE_MASK_SIZE 8
 extern gpgpu_sim* g_the_gpu; 
 extern int num_buffer_entries;
+extern unsigned long long gpu_sim_cycle;
 
 enum exec_unit_type_t
 {
@@ -124,17 +125,6 @@ public:
         m_extended_buffer_full_stall = false;
         m_extended_buffer_in_use = false;
         m_extended_buffer_freshly_initialied = true;
-        //m_extended_buffer->in_use = false;
-        //m_extended_buffer->freshly_initialied = true;
-        /*for (int i = 0; i < extended_buffer_num_entries; i++){
-            m_extended_buffer->address_list.push_back((new_addr_type)0);
-            //m_extended_buffer->address_list[i] = 0;
-            //m_extended_buffer->buffer.push_back(new unsigned int[extended_buffer_buff_size]);
-            for (int j = 0; j < extended_buffer_buff_size; j++){
-                m_extended_buffer->buffer[i][j] = 0;
-            }
-            m_extended_buffer->buffer.push_back(0.0);
-        }*/
 
         reset(); 
     }
@@ -160,21 +150,15 @@ public:
         m_extended_buffer_full_stall = false;
         m_extended_buffer_in_use = false;
         m_extended_buffer_freshly_initialied = true;
-        /*for (int i = 0; i < extended_buffer_num_entries; i++){
-            m_extended_buffer->address_list[i] = 0; // if address list holds 0, means its not in use 
-            //m_extended_buffer.inst_list[i] = 0;
-            //for (int j = 0; j < extended_buffer_buff_size; j++){
-              //  m_extended_buffer->buffer[i][j] = 0;
-            //}
-            m_extended_buffer->buffer[i] = 0;
-            m_extended_buffer->flushed[i] = false;
-        }*/
+
+        m_dynamic_cta_id = (unsigned)-1;
     }
     void init( address_type start_pc,
                unsigned cta_id,
                unsigned wid,
                const std::bitset<MAX_WARP_SIZE> &active,
-               unsigned dynamic_warp_id )
+               unsigned dynamic_warp_id,
+               unsigned dynamic_cta_id )
     {
         m_cta_id=cta_id;
         m_warp_id=wid;
@@ -195,13 +179,11 @@ public:
         m_extended_buffer_freshly_initialied = true;
         for (int i = 0; i < extended_buffer_num_entries; i++){
             m_extended_buffer->address_list[i] = 0; // if address list holds 0, means its not in use 
-            //m_extended_buffer.inst_list[i] = 0;
-            /*for (int j = 0; j < extended_buffer_buff_size; j++){
-                m_extended_buffer->buffer[i][j] = 0;
-            }*/
             m_extended_buffer->buffer[i] = 0;
             m_extended_buffer->flushed[i] = false;
         }
+
+        m_dynamic_cta_id = dynamic_cta_id;
     }
 
     bool functional_done() const;
@@ -421,268 +403,6 @@ public:
         return buff_idx; // returns -1 if cant find address
     }
 
-    /*float extended_buffer_convert_to_float(addr_t address){ // give the address and it will find which buffer it's in
-        return convert_to_float(m_extended_buffer->buffer[extended_buffer_find_idx(address)]);
-    }
-
-    float convert_to_float(unsigned int* buffer)
-    {
-        bool VERBOSE = true;
-        int FIRST = 0;
-        int LAST = 7;
-        unsigned int collange_float;
-        unsigned int* new_buff = new unsigned int[8];
-        bool neg = buffer[LAST] >> 31;
-        bool zeros = true;
-        fb fb_union;
-
-        for (int i = FIRST; i <= LAST; i++)
-        {
-            if (buffer[i] != 0)
-            {
-                zeros = false;
-                break;
-            }
-        }
-
-        if (zeros)
-        {
-            return 0;
-        }
-
-        if (neg)
-        {
-            // twos complement
-            for (int j = FIRST; j <= LAST; j++)
-            {
-                new_buff[j] = ~buffer[j];
-            }
-
-            int carry_i;
-            uint32_t temp_sum = new_buff[FIRST] + 1;
-            new_buff[FIRST] = temp_sum;
-            carry_i = FIRST + 1;
-
-            // propagate carry
-            while (carry_i <= LAST && temp_sum == 0)
-            {
-                temp_sum = new_buff[carry_i] + 1;
-                new_buff[carry_i] = temp_sum;
-                carry_i++;
-            }
-        }
-        else
-        {
-            // just copy buffer
-            for (int j = 0; j < 8; j++)
-            {
-                new_buff[j] = buffer[j];
-            }
-        }
-
-        int non_zero = LAST;
-
-        // find most significant non-zero word
-        while (new_buff[non_zero] == 0)
-        {
-            non_zero--;
-        }
-
-        int non_zero_bit = 31;
-
-        // find most significant non-zero bit
-        while ((new_buff[non_zero] >> non_zero_bit) == 0)
-        {
-            non_zero_bit--;
-        }
-        
-        // mantissa spans two words ("overflows" to adjecent word)
-        if (non_zero_bit < 23)
-        {
-            // get 2^(non_zero_bit + 1) - 1 (0x..fff)
-            unsigned int top_mask = (1 << (non_zero_bit + 1)) - 1;
-
-            // get number of overflow bits
-            unsigned int top_shift = 24 - (non_zero_bit + 1);
-
-            //  shift a 32-bit word until only overflow bits remaining
-            unsigned int bot_shift = 32 - top_shift;
-
-            unsigned int top = new_buff[non_zero] & top_mask;
-
-            unsigned int bottom = (non_zero == FIRST) ? 0 : new_buff[non_zero - 1] >> bot_shift;
-            
-            collange_float = (top << top_shift) | bottom;
-        }
-        else
-        {
-            // find end of mantissa and shift that bit to 0
-            unsigned int shift = non_zero_bit + 1 - 24; 
-            collange_float = new_buff[non_zero] >> shift;
-        }
-        collange_float = (neg ? 0x80000000 : 0x00000000) | ((((non_zero) << 5 | (non_zero_bit)) - 23 + 22) << 23) | (collange_float & 0x7fffff);
-        fb_union.b = collange_float;
-        delete new_buff;
-        return fb_union.f;
-    }
-
-    void print_buffer(unsigned int* buffer)
-    {
-        int FIRST = 0;
-        int LAST = 7;
-        for (int i = LAST; i >= FIRST; i--)
-        {
-            std::cout << std::hex << buffer[i] << " ";
-        }
-        std::cout << ", Float val: " << convert_to_float(buffer);
-        std::cout << std::endl;
-    }
-    
-    void extended_buffer_fp32_add(addr_t address, float input_num) {
-        bool VERBOSE = true;
-        int FIRST = 0;
-        int LAST = 7;
-        int buffer_idx = extended_buffer_find_idx(address);
-
-        if(buffer_idx == -1){
-            printf("Address: %llu not found in buffer, nothing was added\n", address);
-            return;
-        }
-
-        unsigned int* buffer = m_extended_buffer->buffer[buffer_idx];
-        unsigned int g_hits[8] = {0};
-        unsigned int g_carry_only[8] = {0};
-        unsigned int num;
-        bool neg;
-        unsigned char e;
-        int m;
-        int word_num;
-        int shift;
-
-        word w;
-
-        fb actual_f;
-        fb float_byte;
-        fb collange_float;
-        double actual_d;
-
-        bool prev_neg;
-        int g_sign_switch = 0;
-        int sign_switch;
-
-        int g_bits_dropped = 0;
-        int bits_dropped;
-
-        float_byte.f = input_num;
-        num = float_byte.b;
-        actual_f.f += float_byte.f;
-        actual_d += (double) float_byte.f;
-
-        unsigned int hits[8] = {0};
-        unsigned int carry_only[8] = {0};
-
-        actual_f.b = 0;
-        actual_d = 0;
-
-        prev_neg = false;
-        sign_switch = 0;
-        bits_dropped = 0;
-        
-        neg = num >> 31;
-        e = num >> 23 & 0xff;
-        m = (num == 0) ? 0 : (num & 0x7fffff | 0x800000);
-
-        shift = (num == 0) ? 0 : ((e - 22) & 0x1f);
-        word_num = (num == 0) ? 0 : (e - 22) >> 5;
-
-        w.w = ((int64_t) m) << shift;
-
-        if (VERBOSE)
-        {
-            std::cout << "ADD " << std::hex << num << "-> ";
-            std::cout << "m: " << m << " e: 0x" << (unsigned int) e << " (" << "Shift: " << std::dec << shift << ")" << std::endl;
-            std::cout << std::hex << "word " << word_num << ": " << w.hw.bot;
-            std::cout << " word " << word_num + 1 << ": " << w.hw.top << std::endl;
-        }
-
-        uint32_t temp_sum;
-        bool carry = false;
-
-        g_hits[word_num]++;
-        hits[word_num]++;
-            
-        if (w.hw.top != 0)
-        {
-            g_hits[word_num+1]++;
-            hits[word_num+1]++;
-        }
-
-        int word_i;
-        for (word_i = word_num; word_i < word_num + 2; word_i++)
-        {
-            uint32_t val = (word_i == word_num) ? w.hw.bot : w.hw.top;
-            if (word_i <= LAST && word_i >= FIRST)
-            {
-                if (neg)
-                {
-                    temp_sum = buffer[word_i] - val - (carry ? 1 : 0);
-                    carry = (temp_sum > buffer[word_i]);
-                }
-                else
-                {
-                    temp_sum = buffer[word_i] + val + (carry ? 1 : 0);
-                    carry = (temp_sum < buffer[word_i]);
-                }
-                buffer[word_i] = temp_sum;
-            }
-            else
-            {
-                if (word_i == word_num)
-                {
-                    bits_dropped += ((32 - shift) > 0) ? (32 - shift) : 0;
-                    g_bits_dropped += ((32 - shift) > 0) ? (32 - shift) : 0;
-                }
-                else
-                {
-                    bits_dropped += (shift >= 32) ? 24 : shift;
-                    g_bits_dropped += (shift >= 32) ? 24 : shift;
-                }
-                
-            }
-            
-        }
-
-        while (word_i <= LAST && carry)
-        {
-            g_carry_only[word_i]++;
-            carry_only[word_i]++;
-            if (neg)
-            {
-                carry = (buffer[word_i] == 0);
-                buffer[word_i]--;
-            }
-            else
-            {
-                buffer[word_i]++;
-                carry = (buffer[word_i] == 0);
-            }
-            word_i++;
-        }
-        
-        if ((buffer[LAST] >> 31) != prev_neg)
-        {
-            sign_switch++;
-            g_sign_switch++;
-        }
-        prev_neg = buffer[LAST] >> 31;
-
-        if (VERBOSE)
-        {
-            collange_float.b = convert_to_float(buffer);
-            print_buffer(buffer);
-            std::cout << convert_to_float(buffer) << " " << actual_f.b << " " << fabs(collange_float.f - actual_f.f) << std::endl << std::endl;
-        }
-    }*/
     void extended_buffer_fp32_add(addr_t address, float input_num) {
         int buffer_idx = extended_buffer_find_idx(address);
 
@@ -777,6 +497,9 @@ public:
 
     unsigned extended_buffer_num_entries=num_buffer_entries; // how many addresses we can store
     static const unsigned extended_buffer_buff_size=8; // how long the buffer is
+
+    unsigned m_dynamic_cta_id;
+    unsigned m_warps_exec;
 };
 
 
@@ -813,6 +536,7 @@ enum concrete_scheduler
     CONCRETE_SCHEDULER_GTO,
     CONCRETE_SCHEDULER_GTRR,
     CONCRETE_SCHEDULER_GTRTG,
+    CONCRETE_SCHEDULER_GTSG,
     CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE,
     CONCRETE_SCHEDULER_WARP_LIMITING,
     CONCRETE_SCHEDULER_OLDEST_FIRST,
@@ -846,7 +570,16 @@ public:
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.end();
     }
-    virtual void verify_issue(const warp_inst_t *pI)
+    virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
+    {
+
+    }
+    virtual void print_info()
+    {
+
+    }
+
+    virtual void reset_counts()
     {
 
     }
@@ -963,6 +696,9 @@ public:
             }
         }
         //printf("All sch buffer slots cleared, clear whole buffer, slot %d cleared\n", i);
+        if(m_extended_buffer_full_stall){
+            //printf("Flush %d\n", gpu_sim_cycle);
+        }
         m_extended_buffer_in_use = false;
         extended_buffer_clear_all();
     }
@@ -1098,12 +834,111 @@ public:
                     register_set* tensor_core_out,
                     register_set* mem_out,
                     int id )
-	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id ){}
+	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id ){rr = false; exec_barriers = false; first_bar = NULL;skipping_bar=0;}
 	virtual ~srr_scheduler () {}
 	virtual void order_warps ();
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.end();
+        set_blocking();
     }
+
+    virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
+    {
+        assert(((pI->op == BARRIER_OP) == exec_barriers) || !blocking);
+    }
+
+    virtual void print_info()
+    {
+        printf("----------------\n");
+        printf("Barriers skipped: %d\n", skipping_bar);
+    }
+
+    virtual void reset_counts()
+    {
+        
+    }
+
+    void set_blocking();
+    virtual void do_on_warp_issued( unsigned warp_id,
+                                    unsigned num_issued,
+                                    const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
+
+    void get_next_rr_warp(
+    std::vector<shd_warp_t*>::const_iterator& warp_to_check,
+    std::vector<shd_warp_t*>& considered_warps,
+    std::bitset<16>        warp_mask,
+    std::vector<shd_warp_t*>& next_cycle_warp 
+    );
+
+    void setrr(bool b);
+
+    bool exec_barriers;
+    bool rr;
+    bool blocking;
+
+    unsigned long long skipping_bar;
+
+    std::vector<shd_warp_t*> bar_warps;
+    std::bitset<16> warps_to_consider;
+    std::bitset<16> barrier_warps;
+
+    shd_warp_t* first_bar;
+};
+
+class gtrr_scheduler : public srr_scheduler {
+public:
+	gtrr_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+                    Scoreboard* scoreboard, simt_stack** simt,
+                    std::vector<shd_warp_t>* warp,
+                    register_set* sp_out,
+					register_set* dp_out,
+                    register_set* sfu_out,
+					register_set* int_out,
+                    register_set* tensor_core_out,
+                    register_set* mem_out,
+                    int id )
+	: srr_scheduler ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id ){kid=0;cycles_in_rr = 0;cycles_in_gto=0;tot_cycles_in_gto=0;tot_cycles_in_rr=0;}
+	virtual ~gtrr_scheduler () {}
+	virtual void order_warps ();
+    virtual void done_adding_supervised_warps() {
+        m_last_supervised_issued = m_supervised_warps.begin();
+        set_blocking();
+    }
+
+    virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
+    {
+        // has to be in round robin mode to execute atomics
+        if (blocking)
+        {
+            assert(((pI->op == BARRIER_OP) == exec_barriers) || !rr);
+            assert(!pI->really_is_atomic || rr);
+        }
+    }
+    
+    virtual void print_info()
+    {
+        printf("\n----------------------------\n");
+        printf("cycles_in_gto=%d\n", cycles_in_gto);
+        printf("cycles_in_rr=%d\n", cycles_in_rr);
+        printf("tot_cycles_in_gto=%d\n", tot_cycles_in_gto);
+        printf("tot_cycles_in_rr=%d\n", tot_cycles_in_rr);
+    }
+
+    virtual void reset_counts()
+    {
+        cycles_in_rr=0;
+        cycles_in_gto=0;
+    }
+    virtual void do_on_warp_issued( unsigned warp_id,
+                                    unsigned num_issued,
+                                    const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
+
+    int kid;
+
+    unsigned long long cycles_in_rr;
+    unsigned long long cycles_in_gto;
+    unsigned long long tot_cycles_in_rr;
+    unsigned long long tot_cycles_in_gto;
 };
 
 class gtrtg_scheduler : public scheduler_unit {
@@ -1126,11 +961,20 @@ public:
     }
     void setrr(bool b);
     
-    virtual void verify_issue(const warp_inst_t *pI )
+    virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
     {
         // has to be in round robin mode to execute atomics and vice-versa
         assert(rr == pI->really_is_atomic);
+
+        if (rr)
+        {
+            assert(wid == m_atomic_warps.front());
+        }
     }
+
+    virtual void do_on_warp_issued( unsigned warp_id,
+                                    unsigned num_issued,
+                                    const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
 
     bool rr;
     int kid;
@@ -1139,9 +983,9 @@ public:
     std::vector<int> m_atomic_warps;
 };
 
-class gtrr_scheduler : public scheduler_unit {
+class gtsg_scheduler : public scheduler_unit {
 public:
-	gtrr_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+	gtsg_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
                     Scoreboard* scoreboard, simt_stack** simt,
                     std::vector<shd_warp_t>* warp,
                     register_set* sp_out,
@@ -1151,21 +995,61 @@ public:
                     register_set* tensor_core_out,
                     register_set* mem_out,
                     int id )
-	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id ){rr = false; kid = 0;}
-	virtual ~gtrr_scheduler () {}
+	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id )
+    {
+        rr = false;
+        kid = 0;
+        considered_non_atomic = 0;
+        passed_atomic = 0;
+    }
+	virtual ~gtsg_scheduler () {}
 	virtual void order_warps ();
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.begin();
+
+        for (int i = 0; i < m_supervised_warps.size(); i++)
+        {
+            m_prev.push_back(-1);
+        }
     }
     void setrr(bool b);
 
-    virtual void verify_issue(const warp_inst_t *pI )
+    virtual void print_info()
     {
-        // has to be in round robin mode to execute atomics
-        assert(!pI->really_is_atomic || rr);
+        printf("\n----------------------------\n");
+        printf("considered_non_atomic=%d\n", considered_non_atomic);
+        printf("passed_atomic=%d\n", passed_atomic);
     }
+    
+    virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
+    {
+        // has to be in round robin mode to execute atomics and vice-versa
+        assert(rr || !pI->really_is_atomic);
+
+        if (rr && !pI->really_is_atomic)
+        {
+            considered_non_atomic++;
+        }
+        if (pI->really_is_atomic)
+        {
+            assert(wid == m_atomic_warps.front()->get_warp_id());
+        }
+    }
+    
+    virtual void do_on_warp_issued( unsigned warp_id,
+                                    unsigned num_issued,
+                                    const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
+
     bool rr;
+    int num_schedulers;
+    int sid;
     int kid;
+    std::vector<shd_warp_t*> m_atomic_warps;
+    std::vector<int> m_prev;
+
+    std::vector<shd_warp_t* > m_can_also_issue;
+    unsigned long long considered_non_atomic;
+    unsigned long long passed_atomic;
 };
 
 class lrr_scheduler : public scheduler_unit {
@@ -2536,6 +2420,22 @@ public:
     void reinit(unsigned start_thread, unsigned end_thread, bool reset_not_completed );
     void issue_block2core( class kernel_info_t &kernel );
 
+    void print_sch_dist_stats()
+    {
+        for( unsigned i=0; i < schedulers.size(); i++ ) 
+        {
+            schedulers[i]->print_info();
+        }
+    }
+
+    void reset_sch()
+    {
+        for( unsigned i=0; i < schedulers.size(); i++ ) 
+        {
+            schedulers[i]->reset_counts();
+        }
+    }
+
     void cache_flush();
     void cache_invalidate();
     void accept_fetch_response( mem_fetch *mf );
@@ -2806,7 +2706,7 @@ public:
 	 }
 
     int test_res_bus(int latency);
-    void init_warps(unsigned cta_id, unsigned start_thread, unsigned end_thread,unsigned ctaid, int cta_size, unsigned kernel_id);
+    void init_warps(unsigned cta_id, unsigned start_thread, unsigned end_thread,unsigned ctaid, int cta_size, unsigned kernel_id, unsigned dynamic_cta_id);
     virtual void checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned t, unsigned tid);
     address_type next_pc( int tid ) const;
     void fetch();
@@ -2934,6 +2834,21 @@ public:
     bool icnt_injection_buffer_full(unsigned size, bool write);
     void icnt_inject_request_packet(class mem_fetch *mf);
 
+    void print_sch_dist_stats()
+    {
+        for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) 
+        {
+            m_core[i]->print_sch_dist_stats();
+        }
+    }
+
+    void reset_sch()
+    {
+        for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) 
+        {
+            m_core[i]->reset_sch();
+        }
+    }
 
     // for perfect memory interface
     bool response_queue_full() {

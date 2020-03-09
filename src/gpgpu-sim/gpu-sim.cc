@@ -117,6 +117,7 @@ tr1_hash_map<new_addr_type,unsigned> address_random_interleaving;
 #include "mem_latency_stat.h"
 
 int num_buffer_entries;
+int flush_chunk_size;
 
 void power_config::reg_options(class OptionParser * opp)
 {
@@ -484,6 +485,9 @@ void shader_core_config::reg_options(class OptionParser * opp)
     option_parser_register(opp, "-num_buffer_entries", OPT_INT32, &num_buffer_entries,
                             "Number of entries in each buffer (default=32)",
                             "32");
+    option_parser_register(opp, "-flush_chunk_size", OPT_INT32, &flush_chunk_size,
+                            "How many buffer entries to flush each cycle (default=32)",
+                            "32");
 
 }
 
@@ -787,6 +791,8 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    core_to_flush = 0;
    warp_to_flush = 0;
    sch_to_flush = 0;
+   chunk_to_flush = 0;
+   long_flushing_counter = 0;
 
    // for buffer stall flush
    flushing_counter_for_stall = 0;
@@ -795,6 +801,8 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    warp_to_flush_for_stall = 0;
    sch_to_flush_for_stall = 0;
    m_extended_buffer_flush_reqs = 0;
+   chunk_to_flush_for_stall = 0;
+   long_flushing_counter_for_stall = 0;
 
    //stats
    interconnect_full_cycles = 0;
@@ -1008,6 +1016,12 @@ void gpgpu_sim::print_stats()
 {
     ptx_file_line_stats_write_file();
     gpu_print_stat();
+
+    for (int i = 0; i < m_shader_config->n_simt_clusters; i++)
+    {
+       m_cluster[i]->print_sch_dist_stats();
+       m_cluster[i]->reset_sch();
+    }
 
     if (g_network_mode) {
         printf("----------------------------Interconnect-DETAILS--------------------------------\n" );
@@ -1573,7 +1587,7 @@ void shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     m_barriers.allocate_barrier(free_cta_hw_id,warps);
 
     // initialize the SIMT stacks and fetch hardware
-    init_warps( free_cta_hw_id, start_thread, end_thread, ctaid, cta_size, kernel.get_uid());
+    init_warps( free_cta_hw_id, start_thread, end_thread, ctaid, cta_size, kernel.get_uid(), kernel.get_next_cta_id_single());
     m_n_active_cta++;
 
     shader_CTA_count_log(m_sid, 1);
@@ -1961,9 +1975,11 @@ void gpgpu_sim::cycle()
       */
 
       // flushing 1 scheduler per cycle, incrementing cluster first then scheduler then shader
+      int rounds_needed = num_buffer_entries / num_buffer_entries; // set chunk size here
       if(buffer_stalled){
-         while(flushing_counter_for_stall < (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
-            //printf("Cycle %d, At stall flush, Cluster: %d, Core: %d, Schd: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall);
+         //while(flushing_counter_for_stall < (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
+         while(long_flushing_counter_for_stall < (rounds_needed * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
+            //printf("Cycle %d, At stall flush, Cluster: %d, Core: %d, Schd: %d, Chunk: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall);
             flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_sch_level(sch_to_flush_for_stall);
             
             if(flushed_from_stall == -2){ // if interconnect is full, stay on this warp and retry next cycle
@@ -1973,9 +1989,16 @@ void gpgpu_sim::cycle()
             }
             
             flushing_counter_for_stall++;
+            //vvvvv for chunks vvvvv
+            flushing_counter_for_stall = flushing_counter_for_stall % (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
+            long_flushing_counter_for_stall++;
+            //^^^^^ for chunks ^^^^^
             cluster_to_flush_for_stall = flushing_counter_for_stall % (m_shader_config->n_simt_clusters);
             core_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / (m_shader_config->n_simt_clusters * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size()))) % m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster;
             sch_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / m_shader_config->n_simt_clusters)) % m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size();
+            
+            //chunks
+            chunk_to_flush_for_stall = (int)(floor(long_flushing_counter_for_stall / (m_shader_config->n_simt_clusters * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster))) % rounds_needed;
 
             if(flushed_from_stall > 0) {
                num_flushed_from_stall += flushed_from_stall;
@@ -1983,6 +2006,7 @@ void gpgpu_sim::cycle()
             }
          }
       }
+      long_flushing_counter_for_stall = long_flushing_counter_for_stall % (rounds_needed * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
       flushing_counter_for_stall = flushing_counter_for_stall % (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
 
       if(num_flushed_from_stall > 0){
@@ -2074,7 +2098,8 @@ void gpgpu_sim::cycle()
 
       // flushing 1 scheduler per cycle, incrementing cluster first then scheduler then shader
       if(done && !buffer_stalled){
-         while(flushing_counter < (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
+         //while(flushing_counter < (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
+         while(long_flushing_counter < (rounds_needed * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             //printf("Cycle %d, At done flush, Cluster: %d, Core: %d, Schd: %d\n", gpu_sim_cycle, cluster_to_flush, core_to_flush, sch_to_flush);
             flushed = m_cluster[cluster_to_flush]->m_core[core_to_flush]->extended_buffer_flush_sch_level(sch_to_flush);
             
@@ -2084,6 +2109,10 @@ void gpgpu_sim::cycle()
             }
             
             flushing_counter++;
+
+            flushing_counter = flushing_counter % (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
+            long_flushing_counter++;
+
             cluster_to_flush = flushing_counter % (m_shader_config->n_simt_clusters);
             core_to_flush = (int)(floor(flushing_counter / (m_shader_config->n_simt_clusters * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size()))) % m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster;
             sch_to_flush = (int)(floor(flushing_counter / m_shader_config->n_simt_clusters)) % m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size();
@@ -2094,6 +2123,7 @@ void gpgpu_sim::cycle()
             }
          }
       }
+      long_flushing_counter = long_flushing_counter % (rounds_needed * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
       flushing_counter = flushing_counter % (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
 
       if(num_flushed > 0){
