@@ -2455,7 +2455,7 @@ void gtsg_scheduler::order_warps()
 
             for (int i = 0; i < m_supervised_warps.size(); i++)
             {
-                if (m_supervised_warps[i]->m_warps_exec != 0 && !m_supervised_warps[i]->done_exit() && m_supervised_warps[i]->m_warps_exec < lowest_exec)
+                if (m_supervised_warps[i]->m_warps_exec != 0 && !m_supervised_warps[i]->functional_done() && m_supervised_warps[i]->m_warps_exec < lowest_exec)
                 {
                     lowest_exec = m_supervised_warps[i]->m_warps_exec;
                 }
