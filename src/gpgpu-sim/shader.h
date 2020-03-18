@@ -536,7 +536,8 @@ enum concrete_scheduler
     CONCRETE_SCHEDULER_GTO,
     CONCRETE_SCHEDULER_GTRR,
     CONCRETE_SCHEDULER_GTRTG,
-    CONCRETE_SCHEDULER_GTSG,
+    CONCRETE_SCHEDULER_GTAR,
+    CONCRETE_SCHEDULER_GWAT,
     CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE,
     CONCRETE_SCHEDULER_WARP_LIMITING,
     CONCRETE_SCHEDULER_OLDEST_FIRST,
@@ -582,6 +583,11 @@ public:
     virtual void reset_counts()
     {
 
+    }
+
+    virtual void do_on_warp_will_issue(int warp_id)
+    {
+        
     }
 
 
@@ -983,9 +989,9 @@ public:
     std::vector<int> m_atomic_warps;
 };
 
-class gtsg_scheduler : public scheduler_unit {
+class gtar_scheduler : public scheduler_unit {
 public:
-	gtsg_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+	gtar_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
                     Scoreboard* scoreboard, simt_stack** simt,
                     std::vector<shd_warp_t>* warp,
                     register_set* sp_out,
@@ -1002,7 +1008,7 @@ public:
         considered_non_atomic = 0;
         passed_atomic = 0;
     }
-	virtual ~gtsg_scheduler () {}
+	virtual ~gtar_scheduler () {}
 	virtual void order_warps ();
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.begin();
@@ -1050,6 +1056,97 @@ public:
     std::vector<shd_warp_t* > m_can_also_issue;
     unsigned long long considered_non_atomic;
     unsigned long long passed_atomic;
+};
+
+class gwat_scheduler : public scheduler_unit {
+public:
+	gwat_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+                    Scoreboard* scoreboard, simt_stack** simt,
+                    std::vector<shd_warp_t>* warp,
+                    register_set* sp_out,
+					register_set* dp_out,
+                    register_set* sfu_out,
+					register_set* int_out,
+                    register_set* tensor_core_out,
+                    register_set* mem_out,
+                    int id )
+	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id )
+    {
+        rr = false;
+        kid = 0;
+        considered_non_atomic = 0;
+        for (int i = 0; i < 16; i++)
+        {
+            passed_atomic[i] = 0;
+        }
+    }
+	virtual ~gwat_scheduler () {}
+	virtual void order_warps ();
+    virtual void done_adding_supervised_warps() {
+        m_last_supervised_issued = m_supervised_warps.begin();
+
+        for (int i = 0; i < m_supervised_warps.size(); i++)
+        {
+            m_prev.push_back(-1);
+        }
+
+        token_cta = -1;
+        token_warp = 0;
+        token_warp_exec = 1;
+
+    }
+    void setrr(bool b);
+
+    void step_token();
+    
+    virtual void do_on_warp_will_issue(int warp_id);
+
+    virtual void print_info()
+    {
+        printf("\n----------------------------\n");
+        printf("passed_atomic=");
+        for (int i = 0; i < 16; i++)
+        {
+            printf("%d (%d)\t", passed_atomic[i], m_supervised_warps[i]->m_warps_exec);
+        }
+        printf("\n");
+    }
+    
+    virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
+    {
+        /*// has to be in round robin mode to execute atomics and vice-versa
+        assert(rr || !pI->really_is_atomic);
+
+        if (rr && !pI->really_is_atomic)
+        {
+            considered_non_atomic++;
+        }
+        if (pI->really_is_atomic)
+        {
+            assert(wid == m_atomic_warps.front()->get_warp_id());
+        }*/
+    }
+    
+    virtual void do_on_warp_issued( unsigned warp_id,
+                                    unsigned num_issued,
+                                    const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
+
+    bool rr;
+    int num_schedulers;
+    int sid;
+    int kid;
+    std::vector<shd_warp_t*> m_atomic_warps;
+    std::vector<int> m_prev;
+
+    int token_cta;
+    int token_warp;
+    int token_warp_exec;
+
+    std::vector<shd_warp_t* > m_can_also_issue;
+    unsigned long long considered_non_atomic;
+    unsigned long long passed_atomic[16];
+
+    std::vector<int> ctas;
 };
 
 class lrr_scheduler : public scheduler_unit {

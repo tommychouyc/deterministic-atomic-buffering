@@ -157,7 +157,8 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
                                          CONCRETE_SCHEDULER_WARP_LIMITING: sched_config.find("srr") != std::string::npos ? CONCRETE_SCHEDULER_SRR :
                                          sched_config.find("gtrr") != std::string::npos ? CONCRETE_SCHEDULER_GTRR :
                                          sched_config.find("gtrtg") != std::string::npos ? CONCRETE_SCHEDULER_GTRTG : 
-                                         sched_config.find("gtsg") != std::string::npos ? CONCRETE_SCHEDULER_GTSG : 
+                                         sched_config.find("gtar") != std::string::npos ? CONCRETE_SCHEDULER_GTAR : 
+                                         sched_config.find("gwat") != std::string::npos ? CONCRETE_SCHEDULER_GWAT :
                                          NUM_CONCRETE_SCHEDULERS;
     assert ( scheduler != NUM_CONCRETE_SCHEDULERS );
     
@@ -215,9 +216,26 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
                                      )
                 );
                 break;
-            case CONCRETE_SCHEDULER_GTSG:
+            case CONCRETE_SCHEDULER_GTAR:
                 schedulers.push_back(
-                    new gtsg_scheduler( m_stats,
+                    new gtar_scheduler( m_stats,
+                                       this,
+                                       m_scoreboard,
+                                       m_simt_stack,
+                                       &m_warp,
+                                       &m_pipeline_reg[ID_OC_SP],
+									   &m_pipeline_reg[ID_OC_DP],
+                                       &m_pipeline_reg[ID_OC_SFU],
+									   &m_pipeline_reg[ID_OC_INT],
+                                       &m_pipeline_reg[ID_OC_TENSOR_CORE],
+                                       &m_pipeline_reg[ID_OC_MEM],
+                                       i
+                                     )
+                );
+                break;
+            case CONCRETE_SCHEDULER_GWAT:
+                schedulers.push_back(
+                    new gwat_scheduler( m_stats,
                                        this,
                                        m_scoreboard,
                                        m_simt_stack,
@@ -1382,6 +1400,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             //printf("Stall %d\n", gpu_sim_cycle);
             return false; // not enough space
         }
+        //printf("%d Shader %d Warp %d atomic issued\n", gpu_sim_cycle, get_sid(), warp_id);
         //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), schedulers[sch_id]->extended_buffer_locations_remaining());
         //printf("####################### END ISSUE_WARP #######################\n\n");
     }
@@ -1719,12 +1738,17 @@ bool scheduler_unit::cycle()
 
                         if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP)||(pI->op==TENSOR_CORE_LOAD_OP)||(pI->op==TENSOR_CORE_STORE_OP) || (pI->op==ATOMIC_OP)) {
                         	if( m_mem_out->has_free(m_shader->m_config->sub_core_model, m_id) && (!diff_exec_units || previous_issued_inst_exec_type != exec_unit_type_t::MEM)) {
+                                bool is_atomic = pI->really_is_atomic;
                                 if(m_shader->issue_warp(*m_mem_out,pI,active_mask,warp_id,m_id)){
                                     issued++;
                                     issued_inst=true;
                                     warp_inst_issued = true;
                                     previous_issued_inst_exec_type = exec_unit_type_t::MEM;
                                     issue_warp_didnt_issue = false;
+                                    if (is_atomic)
+                                    {
+                                        do_on_warp_will_issue(warp_id);
+                                    }
                                 }
                                 else {
                                     issue_warp_didnt_issue = true;
@@ -2345,13 +2369,13 @@ void gtrtg_scheduler::order_warps()
    }
 }
 
-void gtsg_scheduler::setrr(bool b)
+void gtar_scheduler::setrr(bool b)
 {
     //printf("SHADER %d SCH %d SETTING TO %d\n", m_shader->get_sid(), m_id, b);
     rr = b;
 }
 
-void gtsg_scheduler::do_on_warp_issued(unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
+void gtar_scheduler::do_on_warp_issued(unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
 {
     m_stats->event_warp_issued( m_shader->get_sid(),
                                 warp_id,
@@ -2378,7 +2402,7 @@ bool sort_by_wid(shd_warp_t* i, shd_warp_t* j)
     return (i->get_warp_id() < j->get_warp_id());
 }
 
-void gtsg_scheduler::order_warps()
+void gtar_scheduler::order_warps()
 {
     // TODO find better way to do this
     int k_id = m_shader->get_kernel()->get_uid();
@@ -2452,6 +2476,7 @@ void gtsg_scheduler::order_warps()
         if (m_next_cycle_prioritized_warps.size() == 0)
         {
             unsigned lowest_exec = (0xffffffff);
+            unsigned lowest_total = (0xffffffff);
 
             for (int i = 0; i < m_supervised_warps.size(); i++)
             {
@@ -2459,6 +2484,16 @@ void gtsg_scheduler::order_warps()
                 {
                     lowest_exec = m_supervised_warps[i]->m_warps_exec;
                 }
+                if (m_supervised_warps[i]->m_warps_exec != 0 && m_supervised_warps[i]->m_warps_exec < lowest_total)
+                {
+                    lowest_total = m_supervised_warps[i]->m_warps_exec;
+                }
+            }
+
+            // if there are more CTAs, wait for the new warps first
+            if (lowest_total < lowest_exec && !m_shader->get_kernel()->no_more_ctas_to_run())
+            {
+                lowest_exec = lowest_total;
             }
 
             for (int i = 0; i < m_atomic_warps.size(); i++)
@@ -2514,6 +2549,170 @@ void gtsg_scheduler::order_warps()
             }
         }
    }
+}
+
+void gwat_scheduler::do_on_warp_will_issue(int warp_id)
+{
+    step_token();
+    //printf("Cycle %d Shader %d Schedeuler %d Warp %d issued atomic (token stepped to CTA=%d warp=%d exec=%d)\n", gpu_sim_cycle, get_sid(), m_id, warp_id, token_cta, token_warp, token_warp_exec);
+}
+
+void gwat_scheduler::do_on_warp_issued( unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
+{
+    m_stats->event_warp_issued( m_shader->get_sid(),
+                                warp_id,
+                                num_issued,
+                                warp(warp_id).get_dynamic_warp_id() );
+    
+    warp(warp_id).ibuffer_step();
+}
+void gwat_scheduler::step_token()
+{
+    unsigned min = 0xffffffff;
+    unsigned min_total = 0xffffffff;
+    //printf("%d Shader %d Scheduler %d: stepping token: from CTA=%d Warp=%d (%d) to ", gpu_sim_cycle, get_sid(), m_id, token_cta, token_warp, token_warp_exec);
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        int tested_wid = (token_warp + i + 1)%m_supervised_warps.size();
+
+        if (!m_supervised_warps[tested_wid]->done_exit())
+        {
+            if (m_supervised_warps[tested_wid]->m_warps_exec < min)
+            {
+                min = m_supervised_warps[tested_wid]->m_warps_exec;
+            }
+            if (m_supervised_warps[tested_wid]->m_warps_exec == token_warp_exec)
+            {
+                assert(token_warp_exec == min);
+                assert(min > 0);
+                token_cta = m_supervised_warps[tested_wid]->m_dynamic_cta_id;
+                token_warp = tested_wid;
+                //printf(" CTA=%d Warp=%d (%d)\n", token_cta, token_warp, token_warp_exec);
+                return;
+            }
+        }
+        if (m_supervised_warps[tested_wid]->m_warps_exec != 0 && m_supervised_warps[tested_wid]->m_warps_exec < min_total)
+        {
+            min_total = m_supervised_warps[tested_wid]->m_warps_exec;
+        }
+    }
+
+    if (!m_shader->get_kernel()->no_more_ctas_to_run() && min_total < token_warp_exec)
+    {
+        return;
+    }
+
+    // if there are no more active warps in given tier, move on to next tier unless there are no more CTAs to run, then go to lowest active tier
+    unsigned next_target = (m_shader->get_kernel()->no_more_ctas_to_run()) ? min : (token_warp_exec + 1);
+
+    // cannot find another one, move to next set
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        if (!m_supervised_warps[i]->done_exit())
+        {
+            if (m_supervised_warps[i]->m_warps_exec == next_target)
+            {
+                token_cta = m_supervised_warps[i]->m_dynamic_cta_id;
+                token_warp = i;
+                token_warp_exec = next_target;
+                //printf(" CTA=%d Warp=%d (%d)\n", token_cta, token_warp, token_warp_exec);
+                return;
+            }
+        }
+    }
+    //printf(" CTA=%d Warp=%d (%d, no change)\n", token_cta, token_warp, token_warp_exec);
+
+}
+
+void gwat_scheduler::order_warps()
+{
+    // TODO find better way to do this
+    int k_id = m_shader->get_kernel()->get_uid();
+    // new kernel
+    if (k_id != kid)
+    {
+        for (int i = 0; i < m_supervised_warps.size(); i++)
+        {
+            m_supervised_warps[i]->m_warps_exec = 0;
+            m_prev[i] = -1;
+        }
+        kid = k_id;
+        token_cta = -1;
+        token_warp = 0;
+        token_warp_exec = 1;
+    }
+
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        if (m_supervised_warps[i]->m_dynamic_cta_id != m_prev[i])
+        {
+            // initialize token
+            if (token_cta == -1)
+            {
+                token_cta = m_supervised_warps[i]->m_dynamic_cta_id; 
+            }
+            m_prev[i] = m_supervised_warps[i]->m_dynamic_cta_id;
+            m_supervised_warps[i]->m_warps_exec++;
+        }
+    }
+
+    if (m_supervised_warps[token_warp]->m_dynamic_cta_id != token_cta || m_supervised_warps[token_warp]->done_exit())
+    {
+        //printf("%d Shader %d Scheduler %d: Exiting CTA: CTA=%d Warp=%d (%d)\n", gpu_sim_cycle, get_sid(), m_id, token_cta, token_warp, token_warp_exec);
+        step_token();
+    }
+    
+    order_by_priority( m_next_cycle_prioritized_warps,
+                       m_supervised_warps,
+                       m_last_supervised_issued,
+                       m_supervised_warps.size(),
+                       ORDERING_GREEDY_THEN_PRIORITY_FUNC,
+                       scheduler_unit::sort_warps_by_oldest_dynamic_id );
+
+    for (int i = 0; i < m_next_cycle_prioritized_warps.size(); i++)
+    {
+        if (m_next_cycle_prioritized_warps[i] == NULL)
+        {
+            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+            i--;
+        }
+        else
+        {
+            int wid = m_next_cycle_prioritized_warps[i]->get_warp_id();
+
+            if (wid == -1)
+            {
+                m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                i--;
+            }
+            else
+            {
+                if (m_next_cycle_prioritized_warps[i]->done_exit() || m_next_cycle_prioritized_warps[i]->functional_done())
+                {
+                    m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                    i--;
+                }
+                else
+                {
+                    const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+                    if (pI != NULL && pI->really_is_atomic)
+                    {
+                        if (m_next_cycle_prioritized_warps[i]->m_dynamic_cta_id == token_cta && (m_next_cycle_prioritized_warps[i]->get_warp_id()/4) == token_warp)
+                        {
+                            assert(m_next_cycle_prioritized_warps[i]->m_warps_exec == token_warp_exec);
+                        }
+                        else
+                        {
+                            //m_atomic_warps.push_back(m_next_cycle_prioritized_warps[i]);
+                            passed_atomic[m_next_cycle_prioritized_warps[i]->get_warp_id()/4]++;
+                            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                            i--;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 void lrr_scheduler::order_warps()
