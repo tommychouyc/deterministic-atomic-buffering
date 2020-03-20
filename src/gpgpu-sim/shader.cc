@@ -2575,7 +2575,7 @@ void gwat_scheduler::step_token()
     {
         int tested_wid = (token_warp + i + 1)%m_supervised_warps.size();
 
-        if (!m_supervised_warps[tested_wid]->done_exit())
+        if (!m_supervised_warps[tested_wid]->functional_done())
         {
             if (m_supervised_warps[tested_wid]->m_warps_exec < min)
             {
@@ -2608,7 +2608,7 @@ void gwat_scheduler::step_token()
     // cannot find another one, move to next set
     for (int i = 0; i < m_supervised_warps.size(); i++)
     {
-        if (!m_supervised_warps[i]->done_exit())
+        if (!m_supervised_warps[i]->functional_done())
         {
             if (m_supervised_warps[i]->m_warps_exec == next_target)
             {
@@ -2656,7 +2656,7 @@ void gwat_scheduler::order_warps()
         }
     }
 
-    if (m_supervised_warps[token_warp]->m_dynamic_cta_id != token_cta || m_supervised_warps[token_warp]->done_exit())
+    if (m_supervised_warps[token_warp]->m_dynamic_cta_id != token_cta || m_supervised_warps[token_warp]->functional_done())
     {
         //printf("%d Shader %d Scheduler %d: Exiting CTA: CTA=%d Warp=%d (%d)\n", gpu_sim_cycle, get_sid(), m_id, token_cta, token_warp, token_warp_exec);
         step_token();
