@@ -561,6 +561,10 @@ private:
 
 public:
    // for buffer stall flush
+   int flush_state; // 0 = idle/checking, 1 = flushing
+   std::vector <dim3> blocked_buffers;
+   std::vector <dim3> flush_list;
+
    int flushing_counter_for_stall;
    int cluster_to_flush_for_stall;
    int core_to_flush_for_stall;

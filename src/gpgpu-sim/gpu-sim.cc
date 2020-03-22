@@ -804,6 +804,10 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    chunk_to_flush_for_stall = 0;
    long_flushing_counter_for_stall = 0;
 
+   flush_state = 0;
+   blocked_buffers.clear();
+   flush_list.clear();
+
    //stats
    interconnect_full_cycles = 0;
    tot_interconnect_full_cycles = 0;
@@ -953,6 +957,15 @@ void gpgpu_sim::init()
     partiton_replys_in_parallel = 0;
     partiton_reqs_in_parallel_util = 0;
     gpu_sim_cycle_parition_util = 0;
+
+    flush_state = 0;
+    flush_list.clear();
+    printf("Cycle: %u, Restored %d buffers\n", gpu_sim_cycle, blocked_buffers.size());
+    for (int i = 0; i < blocked_buffers.size(); i++) {
+       //printf("Cycle: %u, Restoring buffer at Cluster %d Core %d Schd %d\n", gpu_sim_cycle, blocked_buffers[i].x, blocked_buffers[i].y, blocked_buffers[i].z);
+       m_cluster[blocked_buffers[i].x]->m_core[blocked_buffers[i].y]->schedulers[blocked_buffers[i].z]->m_extended_buffer_full_stall = 0;
+    }
+    blocked_buffers.clear();
 
     reinit_clock_domains();
     set_param_gpgpu_num_shaders(m_config.num_shader());
@@ -1493,7 +1506,7 @@ void shader_core_ctx::release_shader_resource_1block(unsigned hw_ctaid, kernel_i
  *    object that tells us which kernel to ask for a CTA from 
  */
 
-void shader_core_ctx::issue_block2core( kernel_info_t &kernel ) 
+bool shader_core_ctx::issue_block2core( kernel_info_t &kernel ) 
 {
 
     if(!m_config->gpgpu_concurrent_kernel_sm)
@@ -1501,7 +1514,6 @@ void shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     else
         assert(occupy_shader_resource_1block(kernel, true));
 
-    kernel.inc_running();
 
     // find a free CTA context 
     unsigned free_cta_hw_id=(unsigned)-1;
@@ -1511,14 +1523,21 @@ void shader_core_ctx::issue_block2core( kernel_info_t &kernel )
         max_cta_per_core = kernel_max_cta_per_shader;
     else
         max_cta_per_core = m_config->max_cta_per_core;
-    for (unsigned i=0;i<max_cta_per_core;i++ ) {
+    /*for (unsigned i=0;i<max_cta_per_core;i++ ) {
       if( m_cta_status[i]==0 ) {
          free_cta_hw_id=i;
          break;
       }
     }
-    assert( free_cta_hw_id!=(unsigned)-1 );
-
+    assert( free_cta_hw_id!=(unsigned)-1 );*/
+      /*****************************************************/
+    if (m_cta_status[m_ctas%max_cta_per_core] != 0)
+    {
+       return false;
+    }
+    free_cta_hw_id = m_ctas%max_cta_per_core;
+      /****************************************************/
+    kernel.inc_running();
     // determine hardware threads and warps that will be used for this CTA
     int cta_size = kernel.threads_per_cta();
 
@@ -1593,7 +1612,11 @@ void shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     shader_CTA_count_log(m_sid, 1);
     SHADER_DPRINTF(LIVENESS, "GPGPU-Sim uArch: cta:%2u, start_tid:%4u, end_tid:%4u, initialized @(%lld,%lld)\n", 
         free_cta_hw_id, start_thread, end_thread, gpu_sim_cycle, gpu_tot_sim_cycle );
-
+   
+   /*******************************/
+   m_ctas++;
+   return true;
+   /*******************************/
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -1848,25 +1871,184 @@ void gpgpu_sim::cycle()
       try_snap_shot(gpu_sim_cycle);
       spill_log_to_file (stdout, 0, gpu_sim_cycle);
 
-      /*if(!(active())){
-         printf("GPU not active anymore\n");
-         // perform flush
-         for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
-            printf("Flushing cluster %d\n", i);
-            //m_extended_buffer_flush_reqs += m_cluster[i]->extended_buffer_flush_all();
-            m_cluster[i]->extended_buffer_flush_all();
+      
+      //////////////////////// Flushing State Machine ////////////////////////
+      bool buffer_stalled;
+      int num_flushed_from_stall = 0;
+      int flushed_from_stall = 0;
+      int rounds_needed = num_buffer_entries / flush_chunk_size; // set chunk size here
+
+      if (flush_state == 0) { // Idle / Checking state
+         for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
+            if(m_cluster[i]->check_extended_buffer_stall_sch_level_buffer()) {
+               
+            }
+            else {
+               buffer_stalled = false;
+               break;
+            }
+            buffer_stalled = true;
          }
-         //m_extended_buffer_flush_reqs = 0; //re move later
-         printf("Finished generating final flush requests before kernel exit\n");
-      }*/
-      /*printf("Cycle: %d, Buffer flush checking phase\n", gpu_sim_cycle);
-      for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
-         m_cluster[i]->extended_buffer_flush_all();
+
+         if (buffer_stalled) { // Preparing the flush
+            //printf("Cycle: %u, Changed to Flushing state\n", gpu_sim_cycle);
+            //flush_state = 1; // Next state = Flushing State
+            flushing_counter_for_stall = 0;
+            cluster_to_flush_for_stall = 0;
+            core_to_flush_for_stall = 0;
+            sch_to_flush_for_stall = 0;
+            chunk_to_flush_for_stall = 0;
+
+            // Mark all buffers to be stalled to block new data from entering
+            int buffers_not_in_use = 0;
+            int ready_buffers = 0;
+            for (unsigned j = 0; j < 2; j++) { // shader loop
+               for (unsigned k = 0; k < 4; k++) { // scheduler loop
+                  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
+                     if(m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 0){
+                        buffers_not_in_use++;
+                     }
+                     else if ((m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall == 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)) {
+                        ready_buffers++;
+                        dim3 buffer_ids;
+                        buffer_ids.x = i; // cluster
+                        buffer_ids.y = j; // shader
+                        buffer_ids.z = k; // schd id
+                        flush_list.push_back(buffer_ids);
+                     }
+                     else if ((m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall != 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)){
+                        dim3 buffer_ids;
+                        buffer_ids.x = i; // cluster
+                        buffer_ids.y = j; // shader
+                        buffer_ids.z = k; // schd id
+                        flush_list.push_back(buffer_ids);
+                        blocked_buffers.push_back(buffer_ids);
+                        m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall = 1;
+                     }
+                     //m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall = 1;
+                     //m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use = 1;
+                  }
+               }
+            }
+            if (flush_list.size() > 0) { // if theres something to be flushed
+               flush_state = 1; // Next state = Flushing State
+               printf("Cycle: %u, Changed to Flushing, Blocked %d non full buffers, %d Buffers not in use, %d Buffers had stall flag set\n", gpu_sim_cycle, blocked_buffers.size(), buffers_not_in_use, ready_buffers);
+               printf("Flush list:\n");
+               for (int buffer = 0; buffer < flush_list.size(); buffer++) {
+                  printf("%d: (%d, %d, %d)\n", buffer, flush_list[buffer].x, flush_list[buffer].y, flush_list[buffer].z);
+               }
+            }
+            else {
+               flush_state = 0;
+            }
+         }
+         else {
+            flush_state = 0; // keep checking
+         }
+      }
+      else if (flush_state == 1) { // Flushing State
+         cluster_to_flush_for_stall = flush_list[flushing_counter_for_stall].x;
+         core_to_flush_for_stall = flush_list[flushing_counter_for_stall].y;
+         sch_to_flush_for_stall = flush_list[flushing_counter_for_stall].z;
+
+         flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_sch_level(sch_to_flush_for_stall);
+         printf("Cycle: %d, Flushing Buffer (%d, %d, %d) Chunk %d, (%d)\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall);
+         
+         if(flushed_from_stall == -2){ // if interconnect is full, stay on this warp and retry next cycle
+            interconnect_full_cycles++;
+            tot_interconnect_full_cycles++;
+         }
+         else {
+            flushing_counter_for_stall++;
+         }
+
+         if(flushed_from_stall > 0) {
+            num_flushed_from_stall += flushed_from_stall;
+            //printf("Cycle: %d, Flushing Buffer (%d, %d, %d) Chunk %d, (%d)\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall);
+         }
+
+         if(num_flushed_from_stall > 0){
+            m_extended_buffer_flush_reqs += num_flushed_from_stall;
+            //printf("Cycle %d, Buffer flushed\n", gpu_sim_cycle);
+            buffer_flush_cycles++;
+         }
+
+         if (flushing_counter_for_stall >= flush_list.size()) { // Finished 1 chunk of every buffer
+            flushing_counter_for_stall = 0;
+            chunk_to_flush_for_stall++;
+         }
+
+         if (chunk_to_flush_for_stall >= rounds_needed) { // Flushed everything
+            printf("Finished pushing all buffers\n");
+            flush_list.clear();
+            flushing_counter_for_stall = 0;
+            chunk_to_flush_for_stall = 0;
+            flush_state = 0;
+         }
+
+         /*while(long_flushing_counter_for_stall < (rounds_needed * 4 * 2 * 40)){
+            //printf("Cycle %d, At stall flush, Cluster: %d, Core: %d, Schd: %d, Chunk: %d\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall);
+            flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_sch_level(sch_to_flush_for_stall);
+            
+            if(flushed_from_stall == -2){ // if interconnect is full, stay on this warp and retry next cycle
+               interconnect_full_cycles++;
+               tot_interconnect_full_cycles++;
+               break;
+            }
+            
+            flushing_counter_for_stall++;
+            //vvvvv for chunks vvvvv
+            flushing_counter_for_stall = flushing_counter_for_stall % (4 * 2 * 40);
+            long_flushing_counter_for_stall++;
+            //^^^^^ for chunks ^^^^^
+            cluster_to_flush_for_stall = flushing_counter_for_stall % (40);
+            core_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / (40 * 4))) % 2;
+            sch_to_flush_for_stall = (int)(floor(flushing_counter_for_stall / 40)) % 4;
+            
+            //chunks
+            chunk_to_flush_for_stall = (int)(floor(long_flushing_counter_for_stall / (40 * 4 * 2))) % rounds_needed;
+
+            
+            if(flushed_from_stall > 0) {
+               num_flushed_from_stall += flushed_from_stall;
+               printf("Cycle: %d, At stall flush, Cluster: %d, Core: %d, Schd: %d, Chunk: %d (%d)\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall);
+               break;
+            }
+         }
+
+         if(long_flushing_counter_for_stall >= (rounds_needed * 4 * 2 * 40)) {
+            // we have called the flush function on every buffer
+            printf("Cycle: %u, Pushed all flushed requests, changed to idle state\n", gpu_sim_cycle);
+            flush_state = 1; // Done flushing, go back to Idle/Checking state
+            long_flushing_counter_for_stall = 0;
+            flushing_counter_for_stall = 0;
+            printf("Cycle: %u, Restored %d buffers\n", gpu_sim_cycle, blocked_buffers.size());
+            for (int i = 0; i < blocked_buffers.size(); i++) {
+               //printf("Cycle: %u, Restoring buffer at Cluster %d Core %d Schd %d\n", gpu_sim_cycle, blocked_buffers[i].x, blocked_buffers[i].y, blocked_buffers[i].z);
+               m_cluster[blocked_buffers[i].x]->m_core[blocked_buffers[i].y]->schedulers[blocked_buffers[i].z]->m_extended_buffer_full_stall = 0;
+            }
+            blocked_buffers.clear();
+         }
+
+         //long_flushing_counter_for_stall = long_flushing_counter_for_stall % (rounds_needed * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
+         //flushing_counter_for_stall = flushing_counter_for_stall % (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters);
+
+         if(num_flushed_from_stall > 0){
+            m_extended_buffer_flush_reqs += num_flushed_from_stall;
+            //printf("Cycle %d, Buffer flushed\n", gpu_sim_cycle);
+            buffer_flush_cycles++;
+         }*/
+      }
+      /*else if (flush_state == 2) {
+         if (m_extended_buffer_flush_reqs == 0) {
+            printf("Cycle: %u, Done flushing, changed back to idle state\n", gpu_sim_cycle);
+            flush_state = 0;
+         }
       }*/
 
 
       //////////////////////// Buffer Stall Condition Check ////////////////////////
-      bool buffer_stalled;
+      /*bool buffer_stalled;
       for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
          //if(m_cluster[i]->check_extended_buffer_stall_warp_level_buffer()){
          if(m_cluster[i]->check_extended_buffer_stall_sch_level_buffer()){
@@ -1877,10 +2059,10 @@ void gpgpu_sim::cycle()
             break;
          }
          buffer_stalled = true;
-      }
+      }*/
 
       //////////////////////// Done Condition Check ////////////////////////
-      bool done;
+      /*bool done;
       for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++){
          //if(m_cluster[i]->check_everything_done_except_flush_warp_level_buffer()){
          if(m_cluster[i]->check_everything_done_except_flush_sch_level_buffer()){
@@ -1891,11 +2073,11 @@ void gpgpu_sim::cycle()
             break;
          }
          done = true;
-      }
+      }*/
 
       //////////////////////// Buffer Stall Flush ////////////////////////
-      int num_flushed_from_stall = 0;
-      int flushed_from_stall = 0;
+      //int num_flushed_from_stall = 0;
+      //int flushed_from_stall = 0;
 
       // flushing 1 cluster per cycle
       /*if(buffer_stalled){
@@ -1975,7 +2157,7 @@ void gpgpu_sim::cycle()
       */
 
       // flushing 1 scheduler per cycle, incrementing cluster first then scheduler then shader
-      int rounds_needed = num_buffer_entries / num_buffer_entries; // set chunk size here
+      /*int rounds_needed = num_buffer_entries / flush_chunk_size; // set chunk size here
       if(buffer_stalled){
          //while(flushing_counter_for_stall < (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
          while(long_flushing_counter_for_stall < (rounds_needed * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
@@ -2000,8 +2182,9 @@ void gpgpu_sim::cycle()
             //chunks
             chunk_to_flush_for_stall = (int)(floor(long_flushing_counter_for_stall / (m_shader_config->n_simt_clusters * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush_for_stall]->m_config->n_simt_cores_per_cluster))) % rounds_needed;
 
+            
             if(flushed_from_stall > 0) {
-               num_flushed_from_stall += flushed_from_stall;
+               num_flushed_from_stall += flushed_from_stall;printf("Cycle %d, At stall flush, Cluster: %d, Core: %d, Schd: %d, Chunk: %d (%d)\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall);
                break;
             }
          }
@@ -2018,11 +2201,11 @@ void gpgpu_sim::cycle()
          else{
             buffer_flush_cycles++;
          }
-      }
+      }*/
 
       //////////////////////// Kernel Exit Flush ////////////////////////
-      int num_flushed = 0;
-      int flushed = 0;
+      //int num_flushed = 0;
+      //int flushed = 0;
 
       // flushing 1 cluster per cycle
       /*if(done){ // check if everythings done, flush 1 cluster per cycle, do i need to check if m_extended_buffer_flush_reqs == 0?
@@ -2097,7 +2280,7 @@ void gpgpu_sim::cycle()
       */
 
       // flushing 1 scheduler per cycle, incrementing cluster first then scheduler then shader
-      if(done && !buffer_stalled){
+      /*if(done && !buffer_stalled){
          //while(flushing_counter < (m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
          while(long_flushing_counter < (rounds_needed * m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers.size() * m_cluster[cluster_to_flush]->m_config->n_simt_cores_per_cluster * m_shader_config->n_simt_clusters)){
             //printf("Cycle %d, At done flush, Cluster: %d, Core: %d, Schd: %d\n", gpu_sim_cycle, cluster_to_flush, core_to_flush, sch_to_flush);
@@ -2130,7 +2313,7 @@ void gpgpu_sim::cycle()
          m_extended_buffer_flush_reqs += num_flushed;
          //printf("Cycle %d, kernel exit\n", gpu_sim_cycle);
          kernel_exit_flush_cycles++;
-      }
+      }*/
 
       
 #if (CUDART_VERSION >= 5000)
