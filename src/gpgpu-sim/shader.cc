@@ -508,6 +508,9 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
     m_occupied_ctas = 0;
     m_occupied_hwtid.reset();
     m_occupied_cta_to_hwtid.clear();
+   /***********************************/
+   m_ctas = 0;
+   /***********************************/
 }
 
 void shader_core_ctx::reinit(unsigned start_thread, unsigned end_thread, bool reset_not_completed ) 
@@ -1098,7 +1101,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
         return -2;
     }
-    //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d @@@@@@@@@@@\n", count);
+    //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d (shader %d Sch %d) @@@@@@@@@@@\n", count, get_sid(), sch_id);
     //schedulers[sch_id]->extended_buffer_print_contents();
     int slots_flushed = 0;
     for( int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // only generate mf for the entries that are in use, aka addr != 0
@@ -2402,6 +2405,34 @@ bool sort_by_wid(shd_warp_t* i, shd_warp_t* j)
     return (i->get_warp_id() < j->get_warp_id());
 }
 
+bool gtar_scheduler::check_buffer_stall()
+{
+    if(get_extended_buffer_full_stall()) 
+    {
+        return true;
+    }
+    
+    for(int warp_id = 0; warp_id < m_supervised_warps.size(); warp_id++)
+    {
+        if (!m_supervised_warps[warp_id]->functional_done())
+        {
+            if (m_supervised_warps[warp_id]->m_warps_exec == curr_warp_exec)
+            {
+                return false;
+            } 
+            int wid = m_supervised_warps[warp_id]->get_warp_id();
+            const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+
+            if (pI == NULL || !pI->really_is_atomic)
+            {
+                return false;
+            }
+        }
+    }
+    
+    return true;
+}
+
 void gtar_scheduler::order_warps()
 {
     // TODO find better way to do this
@@ -2415,6 +2446,7 @@ void gtar_scheduler::order_warps()
             m_prev[i] = -1;
         }
         kid = k_id;
+        curr_warp_exec = 1;
     }
 
     for (int i = 0; i < m_supervised_warps.size(); i++)
@@ -2475,6 +2507,7 @@ void gtar_scheduler::order_warps()
         // only atomics left, switch to SRR
         if (m_next_cycle_prioritized_warps.size() == 0)
         {
+            
             unsigned lowest_exec = (0xffffffff);
             unsigned lowest_total = (0xffffffff);
 
@@ -2495,6 +2528,8 @@ void gtar_scheduler::order_warps()
             {
                 lowest_exec = lowest_total;
             }
+
+            curr_warp_exec = lowest_exec;
 
             for (int i = 0; i < m_atomic_warps.size(); i++)
             {
@@ -2575,7 +2610,7 @@ void gwat_scheduler::step_token()
     {
         int tested_wid = (token_warp + i + 1)%m_supervised_warps.size();
 
-        if (!m_supervised_warps[tested_wid]->done_exit())
+        if (!m_supervised_warps[tested_wid]->functional_done())
         {
             if (m_supervised_warps[tested_wid]->m_warps_exec < min)
             {
@@ -2608,7 +2643,7 @@ void gwat_scheduler::step_token()
     // cannot find another one, move to next set
     for (int i = 0; i < m_supervised_warps.size(); i++)
     {
-        if (!m_supervised_warps[i]->done_exit())
+        if (!m_supervised_warps[i]->functional_done())
         {
             if (m_supervised_warps[i]->m_warps_exec == next_target)
             {
@@ -2656,7 +2691,7 @@ void gwat_scheduler::order_warps()
         }
     }
 
-    if (m_supervised_warps[token_warp]->m_dynamic_cta_id != token_cta || m_supervised_warps[token_warp]->done_exit())
+    if (m_supervised_warps[token_warp]->m_dynamic_cta_id != token_cta || m_supervised_warps[token_warp]->functional_done())
     {
         //printf("%d Shader %d Scheduler %d: Exiting CTA: CTA=%d Warp=%d (%d)\n", gpu_sim_cycle, get_sid(), m_id, token_cta, token_warp, token_warp_exec);
         step_token();
@@ -5552,9 +5587,13 @@ unsigned simt_core_cluster::issue_block2core()
         if( m_gpu->kernel_more_cta_left(kernel) && 
 //            (m_core[core]->get_n_active_cta() < m_config->max_cta(*kernel)) ) {
             m_core[core]->can_issue_1block(*kernel)) {
-            m_core[core]->issue_block2core(*kernel);
-            num_blocks_issued++;
-            m_cta_issue_next_core=core; 
+            
+            if (m_core[core]->issue_block2core(*kernel))
+            {
+                num_blocks_issued++;
+                m_cta_issue_next_core=core; 
+                break;
+            }
             break;
         }
     }

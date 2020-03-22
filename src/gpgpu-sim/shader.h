@@ -587,7 +587,25 @@ public:
 
     virtual void do_on_warp_will_issue(int warp_id)
     {
+        //printf("Cycle %d Shader %d Schedeuler %d Warp %d issued atomic\n", gpu_sim_cycle, get_sid(), m_id, warp_id);
+    }
+
+    virtual bool check_buffer_stall()
+    {
+        if(get_extended_buffer_full_stall()) 
+        {
+            return true;
+        }
         
+        for(int warp_id = 0; warp_id < m_supervised_warps.size(); warp_id++)
+        {
+            if (!m_supervised_warps[warp_id]->functional_done())
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
 
@@ -792,6 +810,11 @@ public:
         }
         m_extended_buffer->flushed[buffer_idx] = true;
     }
+    // The m_supervised_warps list is all the warps this scheduler is supposed to
+    // arbitrate between.  This is useful in systems where there is more than
+    // one warp scheduler. In a single scheduler system, this is simply all
+    // the warps assigned to this core.
+    std::vector< shd_warp_t* > m_supervised_warps;
 
 protected:
     virtual void do_on_warp_issued( unsigned warp_id,
@@ -804,11 +827,6 @@ protected:
     // This is the prioritized warp list that is looped over each cycle to determine
     // which warp gets to issue.
     std::vector< shd_warp_t* > m_next_cycle_prioritized_warps;
-    // The m_supervised_warps list is all the warps this scheduler is supposed to
-    // arbitrate between.  This is useful in systems where there is more than
-    // one warp scheduler. In a single scheduler system, this is simply all
-    // the warps assigned to this core.
-    std::vector< shd_warp_t* > m_supervised_warps;
     // This is the iterator pointer to the last supervised warp you issued
     std::vector< shd_warp_t* >::const_iterator m_last_supervised_issued;
     shader_core_stats *m_stats;
@@ -1007,6 +1025,7 @@ public:
         kid = 0;
         considered_non_atomic = 0;
         passed_atomic = 0;
+        curr_warp_exec = 0;
     }
 	virtual ~gtar_scheduler () {}
 	virtual void order_warps ();
@@ -1041,6 +1060,9 @@ public:
             assert(wid == m_atomic_warps.front()->get_warp_id());
         }
     }
+
+    virtual bool check_buffer_stall();
+
     
     virtual void do_on_warp_issued( unsigned warp_id,
                                     unsigned num_issued,
@@ -1056,6 +1078,8 @@ public:
     std::vector<shd_warp_t* > m_can_also_issue;
     unsigned long long considered_non_atomic;
     unsigned long long passed_atomic;
+
+    unsigned curr_warp_exec;
 };
 
 class gwat_scheduler : public scheduler_unit {
@@ -1126,6 +1150,25 @@ public:
             assert(wid == m_atomic_warps.front()->get_warp_id());
         }*/
     }
+
+    virtual bool check_buffer_stall()
+    {
+        if(get_extended_buffer_full_stall()) 
+        {
+            return true;
+        }
+        
+        for(int warp_id = 0; warp_id < m_supervised_warps.size(); warp_id++)
+        {
+            if (!m_supervised_warps[warp_id]->functional_done())
+            {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+
     
     virtual void do_on_warp_issued( unsigned warp_id,
                                     unsigned num_issued,
@@ -2515,7 +2558,7 @@ public:
     // modifiers
     void cycle();
     void reinit(unsigned start_thread, unsigned end_thread, bool reset_not_completed );
-    void issue_block2core( class kernel_info_t &kernel );
+    bool issue_block2core( class kernel_info_t &kernel );
 
     void print_sch_dist_stats()
     {
@@ -2531,6 +2574,7 @@ public:
         {
             schedulers[i]->reset_counts();
         }
+        m_ctas = 0;
     }
 
     void cache_flush();
@@ -2736,15 +2780,30 @@ public:
 
      bool check_extended_buffer_stall_all_sch_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
          for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
-             if (schedulers[sch_id]->m_extended_buffer_in_use) {
+            
+            if (!schedulers[sch_id]->check_buffer_stall())
+            {
+                return false;
+            }
+             /*
+             if (true/*schedulers[sch_id]->m_extended_buffer_in_use) {
                 if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
 
                 }
                 else{ // case where warp is done but scheduler buffer not full so the stall flag isnt set
                     bool warp_in_buffer;
+                    for(int warp_id = 0; warp_id < schedulers[sch_id]->m_supervised_warps.size(); warp_id++)
+                    {
+                        if (!schedulers[sch_id]->m_supervised_warps[warp_id]->functional_done())
+                        //if (!((schedulers[sch_id]->m_supervised_warps[warp_id]->hardware_done() && /*!m_scoreboard->pendingWrites(warp_id) &&*//* !schedulers[sch_id]->m_supervised_warps[warp_id]->done_exit()) || schedulers[sch_id]->m_supervised_warps[warp_id]->functional_done()))
+                        {
+                            return false;
+                        }
+                    }
+                    /*
                     for(int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // checks in all buffer entries to see if any warp there is done
                         for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
-                            warp_in_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
+                            /*warp_in_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
                             if(warp_in_buffer && (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()) || m_warp[warp_id].functional_done()){
                                 
                             }
@@ -2754,17 +2813,41 @@ public:
                             else{
                                 return false;
                             }
+                            if (!m_warp[warp_id].functional_done())
+                            {
+                                return false;
+                            }
                         }
                     }
                 }
-             }
+             }*/
          }
          return true;
      }
 
      bool check_if_shaders_are_done_sch_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
          for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
-             if (schedulers[sch_id]->m_extended_buffer_in_use) {
+            if (!schedulers[sch_id]->check_buffer_stall())
+            {
+                return false;
+            }
+                /*
+             if (true/*schedulers[sch_id]->m_extended_buffer_in_use*//*) {
+                if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
+
+                }
+                else{ // case where warp is done but scheduler buffer not full so the stall flag isnt set
+                    bool warp_in_buffer;
+                    for(int warp_id = 0; warp_id < schedulers[sch_id]->m_supervised_warps.size(); warp_id++)
+                    {
+                        if (!schedulers[sch_id]->m_supervised_warps[warp_id]->functional_done())
+                        {
+                            return false;
+                        }
+                    }
+                }
+             }
+             /*if (schedulers[sch_id]->m_extended_buffer_in_use) {
                 if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
 
                 }
@@ -2785,7 +2868,7 @@ public:
                         }
                     }
                 }
-             }
+             }*/
          }
          return true;
      }
@@ -2909,6 +2992,9 @@ private:
     std::bitset<MAX_THREAD_PER_SM> m_occupied_hwtid;
     std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid; 
 
+    /**********************************************/
+    unsigned int m_ctas;
+    /*********************************************/
 
 };
 
