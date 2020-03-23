@@ -1057,7 +1057,7 @@ int shader_core_ctx::extended_buffer_flush_warp_level( unsigned warpId ) // add 
             //printf("Warp: %d, Flush %d: addr: %u, val: %f\n",warpId ,i , addr, m_warp[warpId].extended_buffer_get_value(addr));
 
             // increment some logs
-            m_warp[warpId].inc_n_atomic(); // maybe
+            //m_warp[warpId].inc_n_atomic(); // maybe
             // Slot cleared in ldst writeback
             m_warp[warpId].m_extended_buffer->flushed[i] = true;
             slots_flushed++;
@@ -1150,7 +1150,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
 
             // increment some logs
-            m_warp[warpId].inc_n_atomic(); // maybe
+            //m_warp[warpId].inc_n_atomic(); // maybe
             // Slot cleared in ldst writeback
             schedulers[sch_id]->m_extended_buffer->flushed[i] = true;
             slots_flushed++;
@@ -2662,6 +2662,10 @@ void gwat_scheduler::step_token()
 void gwat_scheduler::order_warps()
 {
     // TODO find better way to do this
+    if (m_shader->get_kernel() == NULL)
+    {
+        return;
+    }
     int k_id = m_shader->get_kernel()->get_uid();
     // new kernel
     if (k_id != kid)
@@ -3770,7 +3774,7 @@ void ldst_unit::writeback()
                     //flush individual buffer slots here, modify clear slot function to set in use to false when all are clear
                     new_addr_type addr = m_next_wb.m_per_scalar_thread[1].eb_rop_callback.addr;
                     //m_core->m_warp[m_next_wb.m_warp_id].extended_buffer_clear_slot(addr); // for warp level buffers
-                    m_core->schedulers[m_next_wb.m_scheduler_id]->extended_buffer_clear_slot(addr); // for scheduler level buffers
+                    //m_core->schedulers[m_next_wb.m_scheduler_id]->extended_buffer_clear_slot(addr); // for scheduler level buffers
                 }
                 if(g_the_gpu->m_extended_buffer_flush_reqs == 0){
                     m_pending_writes[m_next_wb.warp_id()].erase(m_next_wb.out[0]);
@@ -3845,8 +3849,8 @@ void ldst_unit::writeback()
         case 3: // global/local
             if( m_next_global ) {
                 m_next_wb = m_next_global->get_inst();
-                if( m_next_global->isatomic() ) 
-                    m_core->decrement_atomic_count(m_next_global->get_wid(),m_next_global->get_access_warp_mask().count());
+                //if( m_next_global->isatomic() ) // we discused that this is kinda like like early kernel launching
+                    //m_core->decrement_atomic_count(m_next_global->get_wid(),m_next_global->get_access_warp_mask().count());
                 delete m_next_global;
                 m_next_global = NULL;
                 serviced_client = next_client; 
@@ -4646,7 +4650,7 @@ void shader_core_config::set_pipeline_latency() {
 
 void shader_core_ctx::cycle()
 {
-	if(!isactive() && get_not_completed() == 0)
+	if(!isactive() && get_not_completed() == 0 && g_the_gpu->m_extended_buffer_flush_reqs == 0)
 		return;
 
 	m_stats->shader_cycles[m_sid]++;

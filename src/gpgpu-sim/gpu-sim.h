@@ -586,10 +586,11 @@ public:
    // buffer flush stats
    int interconnect_full_cycles;
    int tot_interconnect_full_cycles;
-   int buffer_pipeline_stalls;
-   int tot_buffer_pipeline_stalls;
-   int kernel_exit_flush_cycles;
-   int buffer_flush_cycles;
+   unsigned long long buffer_pipeline_stalls;
+   unsigned long long tot_buffer_pipeline_stalls;
+   unsigned long long kernel_exit_flush_cycles;
+   unsigned long long buffer_flush_cycles;
+   unsigned long long tot_buffer_flush_cycles;
    int buffer_entries_reuse; // tracks coalescing
 
    unsigned long long  gpu_sim_insn;
