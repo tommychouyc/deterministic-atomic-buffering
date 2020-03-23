@@ -2110,6 +2110,10 @@ void gtrr_scheduler::do_on_warp_issued( unsigned warp_id, unsigned num_issued, c
 
 void gtrr_scheduler::order_warps()
 {
+    if (m_shader->get_kernel() == NULL)
+    {
+        return;
+    }
     
     int k_id = m_shader->get_kernel()->get_uid();
     // new kernel
@@ -2435,6 +2439,11 @@ bool gtar_scheduler::check_buffer_stall()
 
 void gtar_scheduler::order_warps()
 {
+    if (m_shader->get_kernel() == NULL)
+    {
+        return;
+    }
+    
     // TODO find better way to do this
     int k_id = m_shader->get_kernel()->get_uid();
     // new kernel
