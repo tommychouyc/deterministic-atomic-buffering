@@ -2114,7 +2114,6 @@ void gtrr_scheduler::order_warps()
     {
         return;
     }
-    
     int k_id = m_shader->get_kernel()->get_uid();
     // new kernel
     if (k_id != kid)
@@ -2443,7 +2442,6 @@ void gtar_scheduler::order_warps()
     {
         return;
     }
-
     // TODO find better way to do this
     int k_id = m_shader->get_kernel()->get_uid();
     // new kernel
@@ -2595,6 +2593,33 @@ void gtar_scheduler::order_warps()
    }
 }
 
+bool gwat_scheduler::check_buffer_stall()
+{
+    if(get_extended_buffer_full_stall()) 
+    {
+        return true;
+    }
+    
+    for(int warp_id = 0; warp_id < m_supervised_warps.size(); warp_id++)
+    {
+        if (!m_supervised_warps[warp_id]->functional_done())
+        {
+            if (m_supervised_warps[warp_id]->m_warps_exec == token_warp_exec)
+            {
+                return false;
+            } 
+            int wid = m_supervised_warps[warp_id]->get_warp_id();
+            const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+
+            if (pI == NULL || !pI->really_is_atomic)
+            {
+                return false;
+            }
+        }
+    }
+    
+    return true;
+}
 void gwat_scheduler::do_on_warp_will_issue(int warp_id)
 {
     step_token();
@@ -3383,8 +3408,8 @@ bool ldst_unit::memory_cycle( warp_inst_t &inst, mem_stage_stall_type &stall_rea
            //inst.clear_active( access.get_warp_mask() );
            if( inst.is_load() ) { 
               if(inst.op == ATOMIC_OP) { // lovely hard coded reg number to get instruction count to match up, also hardcoded in ldst issue
-                  for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
-                    if(666 > 0) {}
+                  //for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
+                    //if(666 > 0) 
                       //assert( m_pending_writes[inst.warp_id()][666] > 0 );
               }
               else {

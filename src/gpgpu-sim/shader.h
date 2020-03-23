@@ -1122,6 +1122,8 @@ public:
     void setrr(bool b);
 
     void step_token();
+
+    virtual bool check_buffer_stall();
     
     virtual void do_on_warp_will_issue(int warp_id);
 
@@ -1149,24 +1151,6 @@ public:
         {
             assert(wid == m_atomic_warps.front()->get_warp_id());
         }*/
-    }
-
-    virtual bool check_buffer_stall()
-    {
-        if(get_extended_buffer_full_stall()) 
-        {
-            return true;
-        }
-        
-        for(int warp_id = 0; warp_id < m_supervised_warps.size(); warp_id++)
-        {
-            if (!m_supervised_warps[warp_id]->functional_done())
-            {
-                return false;
-            }
-        }
-        
-        return true;
     }
 
     
