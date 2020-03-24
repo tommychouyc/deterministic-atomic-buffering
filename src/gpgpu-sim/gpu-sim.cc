@@ -488,7 +488,8 @@ void shader_core_config::reg_options(class OptionParser * opp)
     option_parser_register(opp, "-flush_chunk_size", OPT_INT32, &flush_chunk_size,
                             "How many buffer entries to flush each cycle (default=32)",
                             "32");
-
+   option_parser_register(opp, "-buffer_coalesce", OPT_BOOL, &coalesce, "Coalesce atomics (default=0)", "0");
+   option_parser_register(opp, "-buffer_stall_early", OPT_BOOL, &stall_early, "Set stall flag early (default=0)", "0");
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)

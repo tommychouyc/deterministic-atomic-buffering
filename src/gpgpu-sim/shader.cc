@@ -348,6 +348,9 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
     }
     for ( int i = 0; i < m_config->gpgpu_num_sched_per_core; ++i ) {
         schedulers[i]->done_adding_supervised_warps();
+        schedulers[i]->coalesce = m_config->coalesce;
+        schedulers[i]->stall_early = m_config->stall_early;
+        assert(!(m_config->coalesce && m_config->stall_early));
     }
     
     //op collector configuration
@@ -1326,7 +1329,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
                 //if(pI->get_atomic() == 393){ // make sure this is ATOMIC_ADD
                     // add the atomic memory locations to diff_addrs vector, num_different is size of diff_addrs vector
                     bool different;
-                    for (int i = 0; i < num_buffer_entries; i++) { // change to size of entries
+                    for (int i = 0; i < 1; i++) { // change to size of entries
                         different = true;
                         if(m_warp[warp_id].m_extended_buffer->address_list[i] == insn_memaddr){
                             different = false;
@@ -1397,8 +1400,9 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
                 //}
             }
         }
+        int space_req = schedulers[sch_id]->coalesce ? diff_addrs.size() : active_mask.size();
         // see if there's enough space in the buffer
-        if(schedulers[sch_id]->extended_buffer_locations_remaining() < active_mask.size()/*diff_addrs.size()*/){ // change to diff_addrs.size() for coalescing
+        if(schedulers[sch_id]->extended_buffer_locations_remaining() < space_req){
             schedulers[sch_id]->set_extended_buffer_full_stall();
             //printf("Stall %d\n", gpu_sim_cycle);
             return false; // not enough space
@@ -1414,6 +1418,15 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
     (*pipe_reg)->issue( active_mask, warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, m_warp[warp_id].get_dynamic_warp_id(), sch_id ); // dynamic instruction information
     m_stats->shader_cycle_distro[2+(*pipe_reg)->active_count()]++;
     func_exec_inst( **pipe_reg, warp_id, active_mask, sch_id );
+
+    if ((next_inst->op==ATOMIC_OP || next_inst->isatomic()) && schedulers[sch_id]->stall_early)
+    {
+        if (schedulers[sch_id]->extended_buffer_locations_remaining() == 0)
+        {
+            schedulers[sch_id]->set_extended_buffer_full_stall();
+        }
+    }
+
     if( next_inst->op == BARRIER_OP ){
         m_warp[warp_id].store_info_of_last_inst_at_barrier(*pipe_reg);
         m_barriers.warp_reaches_barrier(m_warp[warp_id].get_cta_id(),warp_id,const_cast<warp_inst_t*> (next_inst));
@@ -1577,10 +1590,10 @@ shd_warp_t& scheduler_unit::warp(int i){
 
 int scheduler_unit::extended_buffer_first_avail_slot(addr_t address) {
     for (int i = 0; i < extended_buffer_num_entries; i++){
-        /*if (m_extended_buffer->address_list[i] == address) { // uncomment for coalescing
+        if (this->coalesce && m_extended_buffer->address_list[i] == address) {
             g_the_gpu->buffer_entries_reuse++;
             return i;
-        }*/
+        }
         if (m_extended_buffer->address_list[i] == 0) {
             return i;
         }

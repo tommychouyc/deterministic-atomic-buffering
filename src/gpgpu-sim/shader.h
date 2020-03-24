@@ -815,6 +815,8 @@ public:
     // one warp scheduler. In a single scheduler system, this is simply all
     // the warps assigned to this core.
     std::vector< shd_warp_t* > m_supervised_warps;
+    bool coalesce;
+    bool stall_early;
 
 protected:
     virtual void do_on_warp_issued( unsigned warp_id,
@@ -2285,6 +2287,10 @@ struct shader_core_config : public core_config
     bool adpative_volta_cache_config;
 
     int gpgpu_buffer_entry_size;
+
+    // BUFFERS
+    bool coalesce;
+    bool stall_early;
 };
 
 struct shader_core_stats_pod {
