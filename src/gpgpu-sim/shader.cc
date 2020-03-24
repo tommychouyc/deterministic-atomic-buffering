@@ -1326,7 +1326,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
                 //if(pI->get_atomic() == 393){ // make sure this is ATOMIC_ADD
                     // add the atomic memory locations to diff_addrs vector, num_different is size of diff_addrs vector
                     bool different;
-                    for (int i = 0; i < 1; i++) { // change to size of entries
+                    for (int i = 0; i < num_buffer_entries; i++) { // change to size of entries
                         different = true;
                         if(m_warp[warp_id].m_extended_buffer->address_list[i] == insn_memaddr){
                             different = false;
@@ -1379,7 +1379,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
                 //if(pI->get_atomic() == 393){ // make sure this is ATOMIC_ADD
                     // add the atomic memory locations to diff_addrs vector, num_different is size of diff_addrs vector
                     bool different;
-                    for (int i = 0; i < 1; i++) { // change to size of entries
+                    for (int i = 0; i < num_buffer_entries; i++) { // fixed this
                         different = true;
                         if(schedulers[sch_id]->m_extended_buffer->address_list[i] == insn_memaddr){
                             different = false;
@@ -1398,7 +1398,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             }
         }
         // see if there's enough space in the buffer
-        if(schedulers[sch_id]->extended_buffer_locations_remaining() < diff_addrs.size()){
+        if(schedulers[sch_id]->extended_buffer_locations_remaining() < active_mask.size()/*diff_addrs.size()*/){ // change to diff_addrs.size() for coalescing
             schedulers[sch_id]->set_extended_buffer_full_stall();
             //printf("Stall %d\n", gpu_sim_cycle);
             return false; // not enough space
@@ -1577,10 +1577,10 @@ shd_warp_t& scheduler_unit::warp(int i){
 
 int scheduler_unit::extended_buffer_first_avail_slot(addr_t address) {
     for (int i = 0; i < extended_buffer_num_entries; i++){
-        if (m_extended_buffer->address_list[i] == address) {
+        /*if (m_extended_buffer->address_list[i] == address) { // uncomment for coalescing
             g_the_gpu->buffer_entries_reuse++;
             return i;
-        }
+        }*/
         if (m_extended_buffer->address_list[i] == 0) {
             return i;
         }
