@@ -3408,9 +3408,9 @@ bool ldst_unit::memory_cycle( warp_inst_t &inst, mem_stage_stall_type &stall_rea
            //inst.clear_active( access.get_warp_mask() );
            if( inst.is_load() ) { 
               if(inst.op == ATOMIC_OP) { // lovely hard coded reg number to get instruction count to match up, also hardcoded in ldst issue
-                  for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
-                    if(666 > 0) 
-                      assert( m_pending_writes[inst.warp_id()][666] > 0 );
+                  //for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
+                    //if(666 > 0) 
+                      //assert( m_pending_writes[inst.warp_id()][666] > 0 );
               }
               else {
                   for( unsigned r=0; r < MAX_OUTPUT_VALUES; r++) 
