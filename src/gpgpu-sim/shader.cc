@@ -1364,7 +1364,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
         if(schedulers[sch_id]->get_extended_buffer_full_stall()){
             return false;
         }
-        if(schedulers[sch_id]->extended_buffer_full()){
+        if(schedulers[sch_id]->extended_buffer_full() && !schedulers[sch_id]->coalesce){
             schedulers[sch_id]->set_extended_buffer_full_stall();
             //printf("Stall %d\n", gpu_sim_cycle);
             return false;
