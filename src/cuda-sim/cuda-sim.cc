@@ -1983,6 +1983,8 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
                               unsigned hw_cta_id, 
                               unsigned hw_warp_id,
                               gpgpu_t *gpu,
+                              unsigned seed,
+                              unsigned tot_slots,
                               bool isInFunctionalSimulationMode)
 {
    std::list<ptx_thread_info *> &active_threads = kernel.active_threads();
@@ -2044,8 +2046,8 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
 
    if ( shared_memory_lookup.find(sm_idx) == shared_memory_lookup.end() ) {
       if ( g_debug_execution >= 1 ) {
-         printf("  <CTA alloc> : sm_idx=%u sid=%u max_cta_per_sm=%u Next CTA=%u (%u total CTAs) (%u)\n", 
-                sm_idx, sid, max_cta_per_sm, kernel.get_next_cta_id_single(), kernel.num_blocks(), gpu_sim_cycle);
+         printf("  <CTA alloc> : sm_idx=%u sid=%u max_cta_per_sm=%u CTA_id=(%d) Remaining CTAs=%u (%u total CTAs) (%u)\n", 
+                sm_idx, sid, max_cta_per_sm, kernel.get_next_cta_id_det_int(seed, tot_slots), kernel.get_remaining_cta(), kernel.num_blocks(), gpu_sim_cycle);
       }
       char buf[512];
       snprintf(buf,512,"shared_%u", sid);
@@ -2058,8 +2060,8 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
       ptx_cta_lookup[sm_idx] = cta_info;
    } else {
       if ( g_debug_execution >= 1 ) {
-         printf("  <CTA realloc> : sm_idx=%u sid=%u max_cta_per_sm=%u Next CTA=%u (%u total CTAs) (%u)\n", 
-                sm_idx, sid, max_cta_per_sm, kernel.get_next_cta_id_single(), kernel.num_blocks(), gpu_sim_cycle);
+         printf("  <CTA realloc> : sm_idx=%u sid=%u max_cta_per_sm=%u CTA_id=(%d) Remaining CTAs=%u (%u total CTAs) (%u)\n", 
+                sm_idx, sid, max_cta_per_sm,  kernel.get_next_cta_id_det_int(seed, tot_slots), kernel.get_remaining_cta(), kernel.num_blocks(), gpu_sim_cycle);
       }
       shared_mem = shared_memory_lookup[sm_idx];
       sstarr_mem = sstarr_memory_lookup[sm_idx];
@@ -2069,7 +2071,9 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
 
    std::map<unsigned,memory_space*> &local_mem_lookup = local_memory_lookup[sid];
    while( kernel.more_threads_in_cta() ) {
-      dim3 ctaid3d = kernel.get_next_cta_id();
+      
+      dim3 ctaid3d = kernel.get_next_cta_id_det(seed, tot_slots);
+
       unsigned new_tid = kernel.get_next_thread_id();
       dim3 tid3d = kernel.get_next_thread_id_3d();
       kernel.increment_thread_id();
@@ -2123,7 +2127,8 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
       fflush(stdout);
    }
 
-   kernel.increment_cta_id();
+   //kernel.increment_cta_id();
+	kernel.set_cta_issued(kernel.get_next_cta_id_det(seed,tot_slots));
 
    assert( active_threads.size() <= threads_left );
    *thread_info = active_threads.front();
@@ -2483,7 +2488,7 @@ void functionalCoreSim::initializeCTA(unsigned ctaid_cp)
     
     //get threads for a cta
     for(unsigned i=0; i<m_kernel->threads_per_cta();i++) {
-        ptx_sim_init_thread(*m_kernel,&m_thread[i],0,i,m_kernel->threads_per_cta()-i,m_kernel->threads_per_cta(),this,0,i/m_warp_size,(gpgpu_t*)m_gpu, true);
+        ptx_sim_init_thread(*m_kernel,&m_thread[i],0,i,m_kernel->threads_per_cta()-i,m_kernel->threads_per_cta(),this,0,i/m_warp_size,(gpgpu_t*)m_gpu, 0,0, true);
         assert(m_thread[i]!=NULL && !m_thread[i]->is_done());
         char fname[2048];
         snprintf(fname,2048,"checkpoint_files/thread_%d_0_reg.txt",i );

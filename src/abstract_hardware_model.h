@@ -243,6 +243,14 @@ public:
    dim3 get_grid_dim() const { return m_grid_dim; }
    dim3 get_cta_dim() const { return m_block_dim; }
 
+   bool deterministic_issuable_block_available(unsigned seed, unsigned tot_seeds);
+   dim3 get_next_cta_id_det(unsigned seed, unsigned total_slots);
+    void set_cta_issued(dim3 cta);
+    int get_remaining_cta() const;
+    int get_next_det_cta();
+    void print_remaining_cta(int ctas_per_sch);
+    int get_next_cta_id_det_int(unsigned seed, unsigned total_slots);
+
    void increment_cta_id() 
    { 
       increment_x_then_y_then_z(m_next_cta,m_grid_dim); 
@@ -257,7 +265,14 @@ public:
     }
    bool no_more_ctas_to_run() const 
    {
-      return (m_next_cta.x >= m_grid_dim.x || m_next_cta.y >= m_grid_dim.y || m_next_cta.z >= m_grid_dim.z );
+	    unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
+	    for(unsigned i = 0 ; i < n_cta ; i++){
+		    if(m_cta_issued[i] == false){
+			    return false;
+		    }
+	    }
+	    return true;
+      //return (m_next_cta.x >= m_grid_dim.x || m_next_cta.y >= m_grid_dim.y || m_next_cta.z >= m_grid_dim.z );
    }
 
    void increment_thread_id() { increment_x_then_y_then_z(m_next_tid,m_block_dim); }
@@ -337,6 +352,7 @@ private:
    dim3 m_parent_tid;
    std::list<kernel_info_t *> m_child_kernels; //child kernel launched
    std::map< dim3, std::list<CUstream_st *>, dim3comp > m_cta_streams; //streams created in each CTA
+   bool* m_cta_issued;
 
 //Jin: kernel timing
 public:

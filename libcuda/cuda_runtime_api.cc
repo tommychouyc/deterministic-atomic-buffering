@@ -2095,6 +2095,7 @@ void extract_ptx_files_using_cuobjdump(){
 
 
     char ptx_list_file_name[1024];
+	char ptx_list_file_name_temp[1024] = "TEMP.txt";
     snprintf(ptx_list_file_name,1024,"_cuobjdump_list_ptx_XXXXXX");
     int fd2=mkstemp(ptx_list_file_name);
     close(fd2);
@@ -2112,7 +2113,7 @@ void extract_ptx_files_using_cuobjdump(){
     if(!g_cdp_enabled) {
         //based on the list above, dump ptx files individually. Format of dumped ptx file is prog_name.unique_no.sm_<>.ptx
 
-       std::ifstream infile(ptx_list_file_name);
+       std::ifstream infile(ptx_list_file_name_temp);
        std::string line;
        while (std::getline(infile, line))
        {
@@ -2134,7 +2135,7 @@ void extract_ptx_files_using_cuobjdump(){
 	 	printf("\t2. When using PyTorch, PYTORCH_BIN is not set correctly\n");
 	 }
 
-    std::ifstream infile(ptx_list_file_name);
+    std::ifstream infile(ptx_list_file_name_temp);
     std::string line;
     while (std::getline(infile, line))
     {

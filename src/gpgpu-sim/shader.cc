@@ -1400,7 +1400,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
                 //}
             }
         }
-        int space_req = schedulers[sch_id]->coalesce ? diff_addrs.size() : active_mask.size();
+        int space_req = schedulers[sch_id]->coalesce ? diff_addrs.size() : active_mask.count();
         // see if there's enough space in the buffer
         if(schedulers[sch_id]->extended_buffer_locations_remaining() < space_req){
             schedulers[sch_id]->set_extended_buffer_full_stall();
@@ -5645,7 +5645,7 @@ unsigned simt_core_cluster::issue_block2core()
                 m_cta_issue_next_core=core; 
                 break;
             }
-            break;
+            //break;
         }
     }
     return num_blocks_issued;

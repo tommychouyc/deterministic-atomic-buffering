@@ -1520,18 +1520,30 @@ bool shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     // find a free CTA context 
     unsigned free_cta_hw_id=(unsigned)-1;
 
+   unsigned seed = -1;
+    unsigned num_shaders = m_gpu->get_config().num_shader();
+    unsigned tot_seeds =  num_shaders * kernel_max_cta_per_shader;
+
     unsigned max_cta_per_core;
     if(!m_config->gpgpu_concurrent_kernel_sm)
         max_cta_per_core = kernel_max_cta_per_shader;
     else
         max_cta_per_core = m_config->max_cta_per_core;
-    for (unsigned i=0;i<max_cta_per_core;i++ ) {
-      if( m_cta_status[i]==0 ) {
+    for (unsigned i=0;i<max_cta_per_core;i++ ) 
+    {
+      seed = num_shaders*i + m_sid;
+
+      if( m_cta_status[i]==0 && m_kernel->deterministic_issuable_block_available(seed, tot_seeds)) {
          free_cta_hw_id=i;
          break;
       }
     }
-    assert( free_cta_hw_id!=(unsigned)-1 );
+    if (free_cta_hw_id == -1)
+    {
+       return false;
+    }
+
+    //assert( free_cta_hw_id!=(unsigned)-1 );
       /*****************************************************/
     /*if (m_cta_status[m_ctas%max_cta_per_core] != 0)
     {
@@ -1578,7 +1590,7 @@ bool shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     for (unsigned i = start_thread; i<end_thread; i++) {
         m_threadState[i].m_cta_id = free_cta_hw_id;
         unsigned warp_id = i/m_config->warp_size;
-        nthreads_in_block += ptx_sim_init_thread(kernel,&m_thread[i],m_sid,i,cta_size-(i-start_thread),m_config->n_thread_per_shader,this,free_cta_hw_id,warp_id,m_cluster->get_gpu());
+        nthreads_in_block += ptx_sim_init_thread(kernel,&m_thread[i],m_sid,i,cta_size-(i-start_thread),m_config->n_thread_per_shader,this,free_cta_hw_id,warp_id,m_cluster->get_gpu(), seed, tot_seeds);
         m_threadState[i].m_active = true; 
         // load thread local memory and register file
         if(m_gpu->resume_option==1 && kernel.get_uid()==m_gpu->resume_kernel && ctaid>=m_gpu->resume_CTA && ctaid<m_gpu->checkpoint_CTA_t )
@@ -1666,6 +1678,10 @@ void gpgpu_sim::issue_block2core()
         if( num ) {
             m_last_cluster_issue=idx;
             m_total_cta_launched += num;
+        }
+        else if (!m_config.det_cta_static)
+        {
+           return;
         }
     }
 }

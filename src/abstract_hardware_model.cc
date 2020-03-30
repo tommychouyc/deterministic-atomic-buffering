@@ -901,6 +901,12 @@ kernel_info_t::kernel_info_t( dim3 gridDim, dim3 blockDim, class function_info *
     m_num_cores_running=0;
     m_uid = m_next_uid++;
     m_param_mem = new memory_space_impl<8192>("param",64*1024);
+    m_cta_issued = new bool[(gridDim.x)*(gridDim.y)*(gridDim.z)];
+
+    for (int i = 0; i < gridDim.x*gridDim.y*gridDim.z; i++)
+    {
+        m_cta_issued[i] = false;
+    }
 
     //Jin: parent and child kernel management for CDP
     m_parent_kernel = NULL;
@@ -1023,6 +1029,90 @@ void kernel_info_t::destroy_cta_streams() {
      }
      printf("size %lu\n", stream_size);
      m_cta_streams.clear();
+}
+
+bool kernel_info_t::deterministic_issuable_block_available(unsigned seed, unsigned tot_seeds) 
+{
+	assert( seed <tot_seeds);
+	unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
+	for(unsigned i = seed ; i < n_cta ; i+= tot_seeds)
+    {
+		if(m_cta_issued[i] == false)
+        {
+            return true;
+		}
+	}
+	return false;
+}
+
+int kernel_info_t::get_next_cta_id_det_int(unsigned seed, unsigned total_slots){
+	assert( seed <total_slots);
+	unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
+	for(unsigned i = seed; i < n_cta ; i+=total_slots)
+    {
+		if(m_cta_issued[i] == false){
+			return i;
+		}
+	}
+    assert(0);
+	return -1;
+}
+
+dim3 kernel_info_t::get_next_cta_id_det(unsigned seed, unsigned total_slots){
+	assert( seed <total_slots);
+	dim3 res;
+	res.x = res.y = res.z = (unsigned)-1;
+	unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
+	for(unsigned i = seed; i < n_cta ; i+=total_slots)
+    {
+		if(m_cta_issued[i] == false){
+			res.x = i%m_grid_dim.x;
+			res.y = ((i-res.x)/m_grid_dim.x)%m_grid_dim.y;
+			res.z = (i- res.x - res.y*m_grid_dim.x)/ (m_grid_dim.x * m_grid_dim.y);
+			return res;
+		}
+	}
+    assert(0);
+	return res;
+}
+void kernel_info_t::set_cta_issued(dim3 cta){
+	m_cta_issued[cta.x + (m_grid_dim.x)*(cta.y) + (m_grid_dim.x)*(m_grid_dim.y)*(cta.z)] = true;
+	m_next_tid.x = 0;
+	m_next_tid.y = 0;
+	m_next_tid.z = 0;
+}
+int kernel_info_t::get_remaining_cta() const{
+	unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
+    int cnt = 0;
+	for(unsigned i = 0 ; i < n_cta ; i++){
+		if(m_cta_issued[i]== false){
+			cnt++;
+		}
+	}
+	return cnt;
+}
+void kernel_info_t::print_remaining_cta(int ctas_per_sch)
+{
+	unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
+    int cnt = 0;
+	for(unsigned i = 0 ; i < n_cta ; i++){
+		printf("%d ", m_cta_issued[i]);
+        if ((i + 1)%ctas_per_sch == 0)
+        {
+            printf("\n");
+        }
+	}
+}
+int kernel_info_t::get_next_det_cta()
+{
+	unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
+
+	for(unsigned i = 0 ; i < n_cta ; i++){
+		if(m_cta_issued[i]== false){
+			return i;
+		}
+	}
+	return -11;
 }
 
 simt_stack::simt_stack( unsigned wid, unsigned warpSize)
