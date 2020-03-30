@@ -768,7 +768,7 @@ public:
     }
 
     int extended_buffer_first_avail_slot(addr_t address);
-    void extended_buffer_occupy_slot(addr_t address, unsigned warp_id) {
+    void extended_buffer_occupy_slot_and_add(addr_t address, unsigned warp_id, float input_num) {
         m_extended_buffer_freshly_initialied = false;
         assert(address != 0);
         int buffer_idx = extended_buffer_first_avail_slot(address);
@@ -776,6 +776,7 @@ public:
             assert(buffer_idx != -1);
             return;
         }
+	m_extended_buffer->buffer[buffer_idx] += input_num;
         m_extended_buffer_in_use = true;
         m_extended_buffer->address_list[buffer_idx] = address;
         m_extended_buffer->warp_tracker[buffer_idx] = warp_id;

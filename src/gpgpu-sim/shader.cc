@@ -1141,7 +1141,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
                     unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
 
                     // Add callback to the inst to perform the flush atomic
-                    inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->extended_buffer_get_value(addr), addr);
+                    inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[i], addr);
                     //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
                 }
             }
@@ -1237,8 +1237,8 @@ void shader_core_ctx::core_execute_warp_inst_t_atomic_add(warp_inst_t &inst, con
                     float extended_buffer_val = m_warp[warpId].extended_buffer_get_value(insn_memaddr);*/
 
                     // Scheduler level buffers
-                    schedulers[sch_id]->extended_buffer_occupy_slot(insn_memaddr, warpId);
-                    schedulers[sch_id]->extended_buffer_fp32_add(insn_memaddr, insn_operand);
+                    schedulers[sch_id]->extended_buffer_occupy_slot_and_add(insn_memaddr, warpId, insn_operand);
+                    //schedulers[sch_id]->extended_buffer_fp32_add(insn_memaddr, insn_operand);
                     //schedulers[sch_id]->extended_buffer_print_contents();
                     float extended_buffer_val = schedulers[sch_id]->extended_buffer_get_value(insn_memaddr);
 
