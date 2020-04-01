@@ -2017,6 +2017,33 @@ void srr_scheduler::set_blocking()
     blocking = (sched_config.find("blocking") != std::string::npos);
 }
 
+bool srr_scheduler::check_buffer_stall()
+{
+    if(get_extended_buffer_full_stall()) 
+    {
+        return true;
+    }
+    
+    for(int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        int wid = m_supervised_warps[i]->get_warp_id();
+        if (m_shader->warp_waiting_at_barrier(wid))
+        {
+            for (int j = 0; j < 4; j++)
+            {
+                if (j != m_id)
+                {
+                    if (m_shader->schedulers[j]->get_extended_buffer_full_stall())
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 void srr_scheduler::order_warps()
 {   
     m_next_cycle_prioritized_warps.clear();
