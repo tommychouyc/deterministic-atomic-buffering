@@ -2028,7 +2028,7 @@ bool srr_scheduler::check_buffer_stall()
     {
         int wid = m_supervised_warps[i]->get_warp_id();
         bool waiting = false;
-        if (m_shader->warp_waiting_at_barrier(wid))
+        if (!m_supervised_warps[i]->functional_done() && m_shader->warp_waiting_at_barrier(wid))
         {
             for (int j = 0; j < 4; j++)
             {
@@ -2064,7 +2064,7 @@ bool gtrr_scheduler::check_buffer_stall()
     {
         int wid = m_supervised_warps[i]->get_warp_id();
         bool waiting = false;
-        if (m_shader->warp_waiting_at_barrier(wid))
+        if (!m_supervised_warps[i]->functional_done() && m_shader->warp_waiting_at_barrier(wid))
         {
             for (int j = 0; j < 4; j++)
             {
