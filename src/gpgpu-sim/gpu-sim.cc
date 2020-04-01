@@ -1620,7 +1620,7 @@ bool shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     m_barriers.allocate_barrier(free_cta_hw_id,warps);
 
     // initialize the SIMT stacks and fetch hardware
-    init_warps( free_cta_hw_id, start_thread, end_thread, ctaid, cta_size, kernel.get_uid(), kernel.get_next_cta_id_det(seed,tot_slots));
+    init_warps( free_cta_hw_id, start_thread, end_thread, ctaid, cta_size, kernel.get_uid(), kernel.get_next_cta_id_det_int(seed,tot_seeds));
     m_n_active_cta++;
 
     shader_CTA_count_log(m_sid, 1);

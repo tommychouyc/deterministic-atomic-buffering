@@ -874,6 +874,8 @@ public:
         assert(((pI->op == BARRIER_OP) == exec_barriers) || !blocking);
     }
 
+    virtual bool check_buffer_stall();
+
     virtual void print_info()
     {
         printf("----------------\n");
@@ -941,7 +943,8 @@ public:
             assert(!pI->really_is_atomic || rr);
         }
     }
-    
+    virtual bool check_buffer_stall();
+
     virtual void print_info()
     {
         printf("\n----------------------------\n");
