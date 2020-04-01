@@ -959,6 +959,12 @@ void gpgpu_sim::init()
     partiton_replys_in_parallel = 0;
     partiton_reqs_in_parallel_util = 0;
     gpu_sim_cycle_parition_util = 0;
+    
+    last_buffer_flush_count = 0;
+    buffer_flush_count = 0;
+    
+    last_flush_state_count = 0;
+    flush_state_count = 0;
 
     flush_state = 0;
     flush_list.clear();
@@ -1877,12 +1883,20 @@ void gpgpu_sim::cycle()
          }
       }
 
-      if (!(gpu_sim_cycle % 3000)) {
+      if (!(gpu_sim_cycle % 50000)) {
          // deadlock detection 
-         if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {
-            gpu_deadlock = true;
-         } else {
-            last_gpu_sim_insn = gpu_sim_insn;
+         if (m_config.gpu_deadlock_detect)
+         {
+            if ((gpu_sim_insn == last_gpu_sim_insn && !flush_state) || (flush_state && flush_state_count == last_flush_state_count && last_buffer_flush_count == buffer_flush_count))
+            {
+               gpu_deadlock = true;
+            }
+            else
+            {
+               last_gpu_sim_insn = gpu_sim_insn;
+               last_flush_state_count = flush_state_count;
+               last_buffer_flush_count = buffer_flush_count;
+            }
          }
       }
       try_snap_shot(gpu_sim_cycle);
@@ -1949,6 +1963,7 @@ void gpgpu_sim::cycle()
             }
             if (flush_list.size() > 0) { // if theres something to be flushed
                flush_state = 1; // Next state = Flushing State
+               flush_state_count++;
                printf("Cycle: %u, Changed to Flushing, Blocked %d non full buffers, %d Buffers not in use, %d Buffers had stall flag set\n", gpu_sim_cycle, blocked_buffers.size(), buffers_not_in_use, ready_buffers);
                //printf("Flush list:\n");
                for (int buffer = 0; buffer < flush_list.size(); buffer++) {
@@ -1984,6 +1999,7 @@ void gpgpu_sim::cycle()
          }
          else {
             flushing_counter_for_stall++;
+            buffer_flush_count++;
          }
 
          if(flushed_from_stall > 0) {
