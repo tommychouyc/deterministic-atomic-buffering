@@ -1524,6 +1524,8 @@ bool shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     unsigned num_shaders = m_gpu->get_config().num_shader();
     unsigned tot_seeds =  num_shaders * kernel_max_cta_per_shader;
 
+    unsigned int new_cta_id;
+
     unsigned max_cta_per_core;
     if(!m_config->gpgpu_concurrent_kernel_sm)
         max_cta_per_core = kernel_max_cta_per_shader;
@@ -1535,6 +1537,7 @@ bool shader_core_ctx::issue_block2core( kernel_info_t &kernel )
 
       if( m_cta_status[i]==0 && m_kernel->deterministic_issuable_block_available(seed, tot_seeds)) {
          free_cta_hw_id=i;
+         new_cta_id = kernel.get_next_cta_id_det_int(seed,tot_seeds);
          break;
       }
     }
@@ -1620,7 +1623,7 @@ bool shader_core_ctx::issue_block2core( kernel_info_t &kernel )
     m_barriers.allocate_barrier(free_cta_hw_id,warps);
 
     // initialize the SIMT stacks and fetch hardware
-    init_warps( free_cta_hw_id, start_thread, end_thread, ctaid, cta_size, kernel.get_uid(), kernel.get_next_cta_id_det_int(seed,tot_seeds));
+    init_warps( free_cta_hw_id, start_thread, end_thread, ctaid, cta_size, kernel.get_uid(), new_cta_id);
     m_n_active_cta++;
 
     shader_CTA_count_log(m_sid, 1);
