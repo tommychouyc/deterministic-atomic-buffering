@@ -881,15 +881,15 @@ void shader_core_ctx::fetch()
                 // this code checks if this warp has finished executing and can be reclaimed
                 //if( m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit() ) { // original
                 //if(!m_warp[warp_id].m_extended_buffer_in_use && m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){ // for warp level buffers
-                bool warp_using_sch_buffer = false;
+                /*bool warp_using_sch_buffer = false;
                 for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
                     warp_using_sch_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
                     if(warp_using_sch_buffer){
                         break; // warp_id found in schduler buffer
                     }
-                }
+                }*/
 
-                if(!warp_using_sch_buffer && m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){ // for sch level buffers
+                if(/*!warp_using_sch_buffer &&*/ m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()){ // for sch level buffers
                     bool did_exit=false;
                     for( unsigned t=0; t<m_config->warp_size;t++) {
                         unsigned tid=warp_id*m_config->warp_size+t;
