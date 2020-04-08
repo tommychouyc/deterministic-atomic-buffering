@@ -749,9 +749,10 @@ public:
 
     void extended_buffer_print_contents() {
         for (int i = 0; i < extended_buffer_num_entries; i++){
-            printf("Slot %d, Last used warp: %d, Addr: %llu, Buffer: ", i, m_extended_buffer->warp_tracker[i], m_extended_buffer->address_list[i]);
+            printf("Slot %d, Last used warp: %d, Addr: 0x%x, Buffer: ", i, m_extended_buffer->warp_tracker[i], m_extended_buffer->address_list[i]);
             //print_buffer(m_extended_buffer->buffer[i]);
-            printf("%f\n", m_extended_buffer->buffer[i]);
+            printf("0x%x\n", *((unsigned int*) &m_extended_buffer->buffer[i]));
+	    break;
         }
         printf("\n");
     }

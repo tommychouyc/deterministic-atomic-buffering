@@ -1967,7 +1967,6 @@ void gpgpu_sim::cycle()
                printf("Cycle: %u, Changed to Flushing, Blocked %d non full buffers, %d Buffers not in use, %d Buffers had stall flag set\n", gpu_sim_cycle, blocked_buffers.size(), buffers_not_in_use, ready_buffers);
                //printf("Flush list:\n");
                for (int buffer = 0; buffer < flush_list.size(); buffer++) {
-                  //m_cluster[flush_list[buffer].x]->m_core[flush_list[buffer].y]->schedulers[flush_list[buffer].z]->extended_buffer_print_contents();
                   //printf("%d: (%d, %d, %d)\n", buffer, flush_list[buffer].x, flush_list[buffer].y, flush_list[buffer].z);
                }
             }

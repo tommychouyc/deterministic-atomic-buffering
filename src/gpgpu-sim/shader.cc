@@ -1407,6 +1407,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             //printf("Stall %d\n", gpu_sim_cycle);
             return false; // not enough space
         }
+
         //printf("%d Shader %d Warp %d atomic issued\n", gpu_sim_cycle, get_sid(), warp_id);
         //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), schedulers[sch_id]->extended_buffer_locations_remaining());
         //printf("####################### END ISSUE_WARP #######################\n\n");
@@ -2347,7 +2348,8 @@ void gtrr_scheduler::order_warps()
                         {
                             assert(pI->really_is_atomic);
                             m_next_cycle_prioritized_warps.push_back(m_supervised_warps[i]);
-                        }
+                            m_last_supervised_issued = m_supervised_warps.end();
+			}
                     }
                 }
             }
@@ -2751,7 +2753,7 @@ void gwat_scheduler::step_token()
         }
     }
 
-    if (!m_shader->get_kernel()->no_more_ctas_to_run() && min_total < token_warp_exec)
+    if (!m_shader->get_kernel()->no_more_ctas_to_run() && min_total <= token_warp_exec)
     {
         return;
     }
@@ -2807,7 +2809,7 @@ void gwat_scheduler::order_warps()
             // initialize token
             if (token_cta == -1)
             {
-                token_cta = m_supervised_warps[i]->m_dynamic_cta_id; 
+                token_cta = m_supervised_warps[i]->m_dynamic_cta_id;
             }
             m_prev[i] = m_supervised_warps[i]->m_dynamic_cta_id;
             m_supervised_warps[i]->m_warps_exec++;
