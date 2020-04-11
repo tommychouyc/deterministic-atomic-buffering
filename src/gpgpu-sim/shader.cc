@@ -1107,7 +1107,8 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
     //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d (shader %d Sch %d) @@@@@@@@@@@\n", count, get_sid(), sch_id);
     //schedulers[sch_id]->extended_buffer_print_contents();
     int slots_flushed = 0;
-    for( int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // only generate mf for the entries that are in use, aka addr != 0
+    for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
+        int i = j;//(j + ((get_sid()/2)%2)*32)%schedulers[sch_id]->extended_buffer_num_entries;
         new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
         if (addr != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
             warpId = schedulers[sch_id]->m_extended_buffer->warp_tracker[i];
@@ -1369,6 +1370,13 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             //printf("Stall %d\n", gpu_sim_cycle);
             return false;
         }
+
+        if (schedulers[sch_id]->m_extended_buffer->warp_execed != 0 && schedulers[sch_id]->m_extended_buffer->warp_execed < schedulers[sch_id]->m_supervised_warps[warp_id/4]->m_warps_exec)
+        {
+            schedulers[sch_id]->set_extended_buffer_full_stall();
+            return false;
+        }
+
         // see what locations the atomic will write to
         addr_t insn_memaddr = 0;
         std::vector<addr_t> diff_addrs;
@@ -1407,7 +1415,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             //printf("Stall %d\n", gpu_sim_cycle);
             return false; // not enough space
         }
-
+        schedulers[sch_id]->m_extended_buffer->warp_execed =  schedulers[sch_id]->m_supervised_warps[warp_id/4]->m_warps_exec;
         //printf("%d Shader %d Warp %d atomic issued\n", gpu_sim_cycle, get_sid(), warp_id);
         //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), schedulers[sch_id]->extended_buffer_locations_remaining());
         //printf("####################### END ISSUE_WARP #######################\n\n");
@@ -2510,13 +2518,13 @@ bool gtar_scheduler::check_buffer_stall()
             {
                 return false;
             } 
-            int wid = m_supervised_warps[warp_id]->get_warp_id();
-            const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+            //int wid = m_supervised_warps[warp_id]->get_warp_id();
+            //const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
 
-            if (pI == NULL || !pI->really_is_atomic)
-            {
-                return false;
-            }
+            //if (pI == NULL || !pI->really_is_atomic)
+            //{
+            //    return false;
+            //  }
         }
     }
     
@@ -2694,6 +2702,10 @@ bool gwat_scheduler::check_buffer_stall()
             if (m_supervised_warps[warp_id]->m_warps_exec == token_warp_exec)
             {
                 return false;
+            }
+            /*if (m_supervised_warps[warp_id]->m_warps_exec == token_warp_exec)
+            {
+                return false;
             } 
             int wid = m_supervised_warps[warp_id]->get_warp_id();
             const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
@@ -2701,7 +2713,8 @@ bool gwat_scheduler::check_buffer_stall()
             if (pI == NULL || !pI->really_is_atomic)
             {
                 return false;
-            }
+            }*/
+            //return false;
         }
     }
     
@@ -2747,13 +2760,13 @@ void gwat_scheduler::step_token()
                 return;
             }
         }
-        if (m_supervised_warps[tested_wid]->m_warps_exec != 0 && m_supervised_warps[tested_wid]->m_warps_exec < min_total)
+        if (m_supervised_warps[tested_wid]->m_warps_exec != 0 && m_supervised_warps[tested_wid]->m_warps_exec <= min_total)
         {
             min_total = m_supervised_warps[tested_wid]->m_warps_exec;
         }
     }
 
-    if (!m_shader->get_kernel()->no_more_ctas_to_run() && min_total <= token_warp_exec)
+    if (m_shader->more_ctas_to_run() && min_total <= token_warp_exec)
     {
         return;
     }
@@ -2860,6 +2873,9 @@ void gwat_scheduler::order_warps()
                         if (m_next_cycle_prioritized_warps[i]->m_dynamic_cta_id == token_cta && (m_next_cycle_prioritized_warps[i]->get_warp_id()/4) == token_warp)
                         {
                             assert(m_next_cycle_prioritized_warps[i]->m_warps_exec == token_warp_exec);
+                            //auto x = m_next_cycle_prioritized_warps[i];
+                            //m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                            //m_next_cycle_prioritized_warps.insert(m_next_cycle_prioritized_warps.begin(), x);
                         }
                         else
                         {

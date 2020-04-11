@@ -1929,6 +1929,20 @@ void gpgpu_sim::cycle()
             core_to_flush_for_stall = 0;
             sch_to_flush_for_stall = 0;
             chunk_to_flush_for_stall = 0;
+            unsigned int min_tier = 0xffffffff;
+            for (unsigned j = 0; j < 2; j++) { // shader loop
+               for (unsigned k = 0; k < 4; k++) { // scheduler loop
+                  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
+                     if ((m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1))
+                     {
+                        if (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed < min_tier)
+                        {
+                           min_tier = m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed;
+                        }
+                     }
+                  }
+               }
+            }
 
             // Mark all buffers to be stalled to block new data from entering
             int buffers_not_in_use = 0;
@@ -1936,10 +1950,12 @@ void gpgpu_sim::cycle()
             for (unsigned j = 0; j < 2; j++) { // shader loop
                for (unsigned k = 0; k < 4; k++) { // scheduler loop
                   for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
+                     bool same_tier = (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed == min_tier);
+                     //same_tier = true;
                      if(m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 0){
                         buffers_not_in_use++;
                      }
-                     else if ((m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall == 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)) {
+                     else if (same_tier && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall == 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)) {
                         ready_buffers++;
                         dim3 buffer_ids;
                         buffer_ids.x = i; // cluster
@@ -1947,7 +1963,7 @@ void gpgpu_sim::cycle()
                         buffer_ids.z = k; // schd id
                         flush_list.push_back(buffer_ids);
                      }
-                     else if ((m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall != 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)){
+                     else if (same_tier && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall != 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)){
                         dim3 buffer_ids;
                         buffer_ids.x = i; // cluster
                         buffer_ids.y = j; // shader
@@ -1988,7 +2004,7 @@ void gpgpu_sim::cycle()
          flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_sch_level(sch_to_flush_for_stall);
          if (flushed_from_stall > 0)
          {
-            printf("Cycle: %d, Flushing Buffer (%d, %d, %d) Chunk %d, (%d)\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall);
+            printf("Cycle: %d, Flushing Buffer (%d, %d, %d) Chunk %d, (%d, %d)\n", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall, sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall, m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall]->m_extended_buffer->warp_execed );
          }
          
          

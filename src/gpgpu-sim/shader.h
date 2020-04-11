@@ -105,12 +105,13 @@ public:
             flushed.push_back(false);
             warp_tracker.push_back(-1);
         }
+        warp_execed = 0;
     }
     std::vector<new_addr_type> address_list;
     //std::vector<unsigned int*> buffer;
     std::vector<float> buffer;
     std::vector<bool> flushed;
-
+    unsigned int warp_execed;
     std::vector<int> warp_tracker; // for schduler level buffers: tracks the last warp in that shader that uses a buffer entry so it doesnt exit and not process the flush ack
 };
 
@@ -739,6 +740,7 @@ public:
     void extended_buffer_clear_all() {
         m_extended_buffer_full_stall = false;
         m_extended_buffer_in_use = false;
+        m_extended_buffer->warp_execed = 0;
         for (int i = 0; i < extended_buffer_num_entries; i++){
             m_extended_buffer->address_list[i] = 0;
             m_extended_buffer->buffer[i] = 0;
@@ -2570,6 +2572,24 @@ public:
             schedulers[i]->reset_counts();
         }
         m_ctas = 0;
+    }
+
+    bool more_ctas_to_run()
+    {
+        unsigned num_shaders = 80;//m_gpu->get_config().num_shader();
+        unsigned tot_seeds =  num_shaders * kernel_max_cta_per_shader;
+        unsigned max_cta_per_core = kernel_max_cta_per_shader;
+        
+        for (unsigned i=0;i<max_cta_per_core;i++ ) 
+        {
+            int seed = num_shaders*i + m_sid;
+
+            if(m_kernel->deterministic_issuable_block_available(seed, tot_seeds)) 
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     void cache_flush();
