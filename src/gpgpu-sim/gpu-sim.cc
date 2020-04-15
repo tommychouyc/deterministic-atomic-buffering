@@ -820,7 +820,9 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    buffer_entries_reuse = 0;
 
    for (int i = 0; i < 48; i++){
-      mem_sub_partition_counts.push_back(0);
+      for(int j = 0; j < 40; j++){
+         mem_sub_partition_counts[i][j] = 0;
+      }
    }
    
 }
@@ -1998,9 +2000,11 @@ void gpgpu_sim::cycle()
                   m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_count_mem_sub_partition_sch_level(sch_to_flush_for_stall);
                }
                for (int i = 0; i < 48; i++){ // print counts and send counts
-                  printf("Sub partition %d counts: %d\n", i, mem_sub_partition_counts[i]);
-                  m_cluster[0]->m_core[0]->push_mem_sub_partition_counts(i, mem_sub_partition_counts[i]);
-                  mem_sub_partition_counts[i] = 0; // clear after pushing counts
+                  for (int j = 0; j < 40; j++){
+                     printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
+                     m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, mem_sub_partition_counts[i][j]);
+                     mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
+                  }
                }
             }
             else {

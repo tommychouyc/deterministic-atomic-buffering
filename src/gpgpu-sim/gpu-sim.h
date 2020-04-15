@@ -571,7 +571,7 @@ public:
    std::vector <dim3> blocked_buffers;
    std::vector <dim3> flush_list;
 
-   std::vector <int> mem_sub_partition_counts;
+   int mem_sub_partition_counts [48][40];
 
    int flushing_counter_for_stall;
    int cluster_to_flush_for_stall;
