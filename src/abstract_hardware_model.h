@@ -97,7 +97,8 @@ enum uarch_op_t {
    MEMORY_BARRIER_OP,
    CALL_OPS,
    RET_OPS,
-   ATOMIC_OP
+   ATOMIC_OP,
+   BUFFER_COUNT
 };
 typedef enum uarch_op_t op_type;
 
@@ -1077,6 +1078,7 @@ public:
     void completed( unsigned long long cycle ) const;  // stat collection: called when the instruction is completed  
 
     void set_cache_op(cache_operator_type type) { cache_op = type; }
+    void set_m_empty(bool empty) { m_empty = empty; }
     void set_op(uarch_op_t type) { op = type; }
     void set_space(_memory_space_t type) { space.set_type(type); }
     void set_data_size(unsigned int size) { data_size = size; }

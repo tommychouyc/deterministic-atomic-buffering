@@ -43,7 +43,8 @@ public:
 		  READ_REPLY    = 1,
 		  WRITE_REQUEST = 2,
 		  WRITE_REPLY   = 3,
-                  ANY_TYPE      = 4 };
+                  ANY_TYPE      = 4,
+      BUFFER_COUNTS = 5 };
   FlitType type;
 
   int vc;

@@ -818,6 +818,10 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    buffer_flush_cycles = 0;
    tot_buffer_flush_cycles = 0;
    buffer_entries_reuse = 0;
+
+   for (int i = 0; i < 48; i++){
+      mem_sub_partition_counts.push_back(0);
+   }
    
 }
 
@@ -1984,6 +1988,19 @@ void gpgpu_sim::cycle()
                //printf("Flush list:\n");
                for (int buffer = 0; buffer < flush_list.size(); buffer++) {
                   //printf("%d: (%d, %d, %d)\n", buffer, flush_list[buffer].x, flush_list[buffer].y, flush_list[buffer].z);
+               }
+
+               // Count how many pushes each memory paritition requires
+               for (int buffer = 0; buffer < flush_list.size(); buffer++) {
+                  cluster_to_flush_for_stall = flush_list[buffer].x;
+                  core_to_flush_for_stall = flush_list[buffer].y;
+                  sch_to_flush_for_stall = flush_list[buffer].z;
+                  m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_count_mem_sub_partition_sch_level(sch_to_flush_for_stall);
+               }
+               for (int i = 0; i < 48; i++){ // print counts and send counts
+                  printf("Sub partition %d counts: %d\n", i, mem_sub_partition_counts[i]);
+                  m_cluster[0]->m_core[0]->push_mem_sub_partition_counts(i, mem_sub_partition_counts[i]);
+                  mem_sub_partition_counts[i] = 0; // clear after pushing counts
                }
             }
             else {

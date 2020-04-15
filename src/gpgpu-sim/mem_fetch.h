@@ -36,7 +36,8 @@ enum mf_type {
    READ_REQUEST = 0,
    WRITE_REQUEST,
    READ_REPLY, // send to shader
-   WRITE_ACK
+   WRITE_ACK,
+   BUFFER_COUNTS
 };
 
 #define MF_TUP_BEGIN(X) enum X {
@@ -88,6 +89,7 @@ public:
    unsigned get_access_size() const { return m_access.get_size(); }
    new_addr_type get_partition_addr() const { return m_partition_addr; }
    unsigned get_sub_partition_id() const { return m_raw_addr.sub_partition; }
+   void set_sub_partition_id( unsigned id) { m_raw_addr.sub_partition = id; }
    bool     get_is_write() const { return m_access.is_write(); }
    unsigned get_request_uid() const { return m_request_uid; }
    unsigned get_sid() const { return m_sid; }
@@ -96,6 +98,7 @@ public:
    bool istexture() const;
    bool isconst() const;
    enum mf_type get_type() const { return m_type; }
+   void set_mf_type( mf_type type) { m_type = type; }
    bool isatomic() const;
 
    void set_return_timestamp( unsigned t ) { m_timestamp2=t; }
@@ -119,7 +122,8 @@ public:
 
    mem_fetch* get_original_mf() { return original_mf; }
    mem_fetch* get_original_wr_mf()  { return original_wr_mf; }
-
+   addrdec_t m_raw_addr;
+   int expected_buffer_entries;
 private:
    // request source information
    unsigned m_request_uid;
@@ -136,7 +140,7 @@ private:
    unsigned m_data_size; // how much data is being written
    unsigned m_ctrl_size; // how big would all this meta data be in hardware (does not necessarily match actual size of mem_fetch)
    new_addr_type m_partition_addr; // linear physical address *within* dram partition (partition bank select bits squeezed out)
-   addrdec_t m_raw_addr; // raw physical address (i.e., decoded DRAM chip-row-bank-column address)
+   //addrdec_t m_raw_addr; // raw physical address (i.e., decoded DRAM chip-row-bank-column address)
    enum mf_type m_type;
 
    // statistics

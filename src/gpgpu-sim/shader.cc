@@ -1172,6 +1172,21 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
 		    m_icnt->push(mf);
             //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
 
+            
+
+            /*unsigned useful_cluster = mf->get_sub_partition_id();
+            for (int cluster_id = 0; cluster_id < 40; cluster_id++) {
+                if(cluster_id == useful_cluster){
+                    m_icnt->push(mf);
+                }
+                else {
+                    const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_useless_mf(0);
+                    mem_fetch *useless_mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config);
+                    mf->set_sub_partition_id(cluster_id);
+                    m_icnt->push(useless_mf);
+                }
+            }*/
+
             // increment some logs
             //m_warp[warpId].inc_n_atomic(); // maybe
             // Slot cleared in ldst writeback
@@ -1188,6 +1203,148 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         //printf("Warp: %d, Nothing flushed\n", warpId);
     }
     return slots_flushed;
+}
+
+int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned sch_id ) // add a check for m_extended_buffer_full_stall except for the final kernel end flush
+{
+    int warpId; // hardcoded placeholder
+    if(!(schedulers[sch_id]->m_extended_buffer_in_use)){
+        return -1;
+    }
+
+    int count = 0;
+    for( int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // find how many will be pushed to interconnect
+        if(schedulers[sch_id]->m_extended_buffer->address_list[i] != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
+            count++;
+        }
+    }
+
+    if (count == 0){
+        //printf("Warp: %d, Nothing to flush\n", warpId);
+        return 0;
+    }
+    int max_flush = flush_chunk_size; // set chunk size here
+    int new_count;
+    if(count >= max_flush){
+        new_count = max_flush;
+    }
+    else{
+        new_count = count;
+    }
+
+    if(m_icnt->full(40*new_count,true)){ // used to be just 32, 40 is flit size
+        //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
+        return -2;
+    }
+    //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d (shader %d Sch %d) @@@@@@@@@@@\n", count, get_sid(), sch_id);
+    //schedulers[sch_id]->extended_buffer_print_contents();
+    int slots_flushed = 0;
+    for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
+        int i = j;
+        //int i = (j + ((get_sid()/2)%2)*32)%schedulers[sch_id]->extended_buffer_num_entries;
+        new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
+        if (addr != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
+            warpId = schedulers[sch_id]->m_extended_buffer->warp_tracker[i];
+            // Make the mem_access
+            const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_mem_access_for_entry(i); // TODO: FIX this function to only make the mask to 1 thread
+
+            // Make the inst for mem_fetch
+            warp_inst_t* inst = new warp_inst_t(m_config);
+            inst->set_cache_op(CACHE_GLOBAL);
+            inst->set_op(ATOMIC_OP);
+            inst->set_oprnd_type(FP_OP);
+            inst->set_space(global_space);
+            inst->set_memory_op(no_memory_op);
+            inst->set_data_size(32); // not sure if 32
+            inst->set_m_warp_id(warpId); // maybe
+            inst->set_m_scheduler_id(sch_id);
+            inst->set_out(666); //maaaaaaaaaaaybeeeeeeeeee, hard coded value
+            inst->set_outcount(1); // hardcode
+            //inst->set_in();
+            //inst->set_incount(0);
+            //m_ldst_unit->m_pending_writes[warpId][666] += 1; // what should this be? the original atomic handled this
+
+            // active mask shoud be only 1 bit since the bits of the mask determine which threads perform their callback, 
+            // so i only need 1 thread in the warp to perform 1 callback since i only have 1 buffer value
+            active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
+            for( unsigned j=0; j < m_config->warp_size; j++ ){
+                if( active_mask.test(j) ){
+                    inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
+                    unsigned warp_id = warpId;
+                    // unique hardware warp id across the entire GPU
+                    unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
+
+                    // Add callback to the inst to perform the flush atomic
+                    inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[i], addr);
+                    //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
+                }
+            }
+
+            // Make the mem_fetch
+            inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[sch_id]->get_schd_id()); // is the schd_id correct?
+		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
+		    //m_icnt->push(mf);
+            unsigned useful_cluster = mf->get_sub_partition_id();
+            g_the_gpu->mem_sub_partition_counts[useful_cluster]++;
+
+
+            //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
+
+            
+
+            /*unsigned useful_cluster = mf->get_sub_partition_id();
+            for (int cluster_id = 0; cluster_id < 40; cluster_id++) {
+                if(cluster_id == useful_cluster){
+                    m_icnt->push(mf);
+                }
+                else {
+                    const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_useless_mf(0);
+                    mem_fetch *useless_mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config);
+                    mf->set_sub_partition_id(cluster_id);
+                    m_icnt->push(useless_mf);
+                }
+            }*/
+
+            // increment some logs
+            //m_warp[warpId].inc_n_atomic(); // maybe
+            // Slot cleared in ldst writeback
+            //schedulers[sch_id]->m_extended_buffer->flushed[i] = true;
+            slots_flushed++;
+        }
+        if(slots_flushed >= max_flush){ // to support flushing in chunks
+            //printf("Flushed %d entries, %d left to flush\n", max_flush, count - max_flush);
+            break;
+        }
+    }
+
+    if(slots_flushed == 0){
+        //printf("Warp: %d, Nothing flushed\n", warpId);
+    }
+    return slots_flushed;
+}
+
+int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, int counts) {
+    if(m_icnt->full(40,true)){ 
+        //printf("Sub partition: %d, Interconnect full when trying to push sub parttion counts\n", sub_partition_id);
+        return -2;
+    }
+
+    const mem_access_t &counts_mem_access = schedulers[0]->extended_buffer_generate_useless_mem_access(counts);
+    warp_inst_t* inst = new warp_inst_t(m_config);
+    inst->set_cache_op(CACHE_GLOBAL);
+    inst->set_op(BUFFER_COUNT);
+    inst->set_oprnd_type(FP_OP);
+    inst->set_space(global_space);
+    inst->set_memory_op(no_memory_op);
+    inst->set_data_size(32); // not sure if 32
+    inst->set_m_warp_id(0); // maybe
+    inst->set_m_scheduler_id(0);
+    inst->set_m_empty(false);
+
+    mem_fetch *mf = new mem_fetch(counts_mem_access, inst, WRITE_PACKET_SIZE, 0, 0, 0, m_memory_config); //??
+    mf->set_sub_partition_id(sub_partition_id);
+    mf->set_mf_type(BUFFER_COUNTS);
+    m_icnt->push(mf);
 }
 
 int shd_warp_t::extended_buffer_first_avail_slot(addr_t address) {
