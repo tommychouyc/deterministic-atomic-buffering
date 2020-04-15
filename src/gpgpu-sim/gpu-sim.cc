@@ -2002,7 +2002,7 @@ void gpgpu_sim::cycle()
                for (int i = 0; i < 48; i++){ // print counts and send counts
                   for (int j = 0; j < 40; j++){
                      printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
-                     m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, mem_sub_partition_counts[i][j]);
+                     m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j]);
                      mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
                   }
                }

@@ -1324,7 +1324,7 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
     return slots_flushed;
 }
 
-int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, int counts) {
+int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, unsigned cluster, int counts) {
     if(m_icnt->full(40,true)){ 
         //printf("Sub partition: %d, Interconnect full when trying to push sub parttion counts\n", sub_partition_id);
         return -2;
@@ -1342,7 +1342,7 @@ int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, in
     inst->set_m_scheduler_id(0);
     inst->set_m_empty(false);
 
-    mem_fetch *mf = new mem_fetch(counts_mem_access, inst, WRITE_PACKET_SIZE, 0, 0, 0, m_memory_config); //??
+    mem_fetch *mf = new mem_fetch(counts_mem_access, inst, WRITE_PACKET_SIZE, 0, 0, cluster, m_memory_config); //??
     mf->set_sub_partition_id(sub_partition_id);
     mf->set_mf_type(BUFFER_COUNTS);
     m_icnt->push(mf);

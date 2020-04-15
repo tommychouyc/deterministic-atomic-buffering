@@ -2863,7 +2863,7 @@ public:
      int extended_buffer_flush_warp_level( unsigned warpId );
      int extended_buffer_flush_sch_level( unsigned sch_id );
      int extended_buffer_count_mem_sub_partition_sch_level( unsigned sch_id );
-     int push_mem_sub_partition_counts(unsigned sub_partition_id, int counts);
+     int push_mem_sub_partition_counts(unsigned sub_partition_id, unsigned cluster, int counts);
      bool check_extended_buffer_stall_all_warp_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
          for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
              if (m_warp[warp_id].m_extended_buffer_in_use) {
