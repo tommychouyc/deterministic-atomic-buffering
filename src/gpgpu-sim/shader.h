@@ -539,6 +539,7 @@ enum concrete_scheduler
     CONCRETE_SCHEDULER_GTRTG,
     CONCRETE_SCHEDULER_GTAR,
     CONCRETE_SCHEDULER_GWAT,
+    CONCRETE_SCHEDULER_KENDO,
     CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE,
     CONCRETE_SCHEDULER_WARP_LIMITING,
     CONCRETE_SCHEDULER_OLDEST_FIRST,
@@ -1181,6 +1182,87 @@ public:
     std::vector<shd_warp_t* > m_can_also_issue;
     unsigned long long considered_non_atomic;
     unsigned long long passed_atomic[16];
+
+    std::vector<int> ctas;
+};
+
+class kendo_scheduler : public scheduler_unit {
+public:
+	kendo_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
+                    Scoreboard* scoreboard, simt_stack** simt,
+                    std::vector<shd_warp_t>* warp,
+                    register_set* sp_out,
+					register_set* dp_out,
+                    register_set* sfu_out,
+					register_set* int_out,
+                    register_set* tensor_core_out,
+                    register_set* mem_out,
+                    int id )
+	: scheduler_unit ( stats, shader, scoreboard, simt, warp, sp_out, dp_out, sfu_out, int_out, tensor_core_out, mem_out, id )
+    {
+        rr = false;
+        kid = 0;
+        considered_non_atomic = 0;
+        for (int i = 0; i < 16; i++)
+        {
+            passed_atomic[i] = 0;
+        }
+    }
+	virtual ~kendo_scheduler () {}
+	virtual void order_warps ();
+    virtual void done_adding_supervised_warps() {
+        m_last_supervised_issued = m_supervised_warps.begin();
+
+        for (int i = 0; i < m_supervised_warps.size(); i++)
+        {
+            m_prev.push_back(-1);
+            icounts.push_back(0);
+        }
+    }
+    void setrr(bool b);
+
+    virtual bool check_buffer_stall();
+    
+    bool check_can_issue_atomic(int warp_id);
+
+    void do_on_warp_will_issue(int warp_id);
+
+    virtual void print_info()
+    {
+        printf("\n----------------------------\n");
+        printf("passed_atomic=");
+        for (int i = 0; i < 16; i++)
+        {
+            printf("%d (%d)\t", passed_atomic[i], m_supervised_warps[i]->m_warps_exec);
+        }
+        printf("\n");
+    }
+    
+    virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
+    {
+    }
+
+    
+    virtual void do_on_warp_issued( unsigned warp_id,
+                                    unsigned num_issued,
+                                    const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
+
+    bool rr;
+    int num_schedulers;
+    int sid;
+    int kid;
+    unsigned exec_to_check;
+    std::vector<shd_warp_t*> m_atomic_warps;
+    std::vector<int> m_prev;
+
+    int token_cta;
+    int token_warp;
+    int token_warp_exec;
+
+    std::vector<shd_warp_t* > m_can_also_issue;
+    unsigned long long considered_non_atomic;
+    unsigned long long passed_atomic[16];
+    std::vector<unsigned long long> icounts;
 
     std::vector<int> ctas;
 };

@@ -159,6 +159,7 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
                                          sched_config.find("gtrtg") != std::string::npos ? CONCRETE_SCHEDULER_GTRTG : 
                                          sched_config.find("gtar") != std::string::npos ? CONCRETE_SCHEDULER_GTAR : 
                                          sched_config.find("gwat") != std::string::npos ? CONCRETE_SCHEDULER_GWAT :
+                                         sched_config.find("kendo") != std::string::npos ? CONCRETE_SCHEDULER_KENDO :
                                          NUM_CONCRETE_SCHEDULERS;
     assert ( scheduler != NUM_CONCRETE_SCHEDULERS );
     
@@ -236,6 +237,23 @@ shader_core_ctx::shader_core_ctx( class gpgpu_sim *gpu,
             case CONCRETE_SCHEDULER_GWAT:
                 schedulers.push_back(
                     new gwat_scheduler( m_stats,
+                                       this,
+                                       m_scoreboard,
+                                       m_simt_stack,
+                                       &m_warp,
+                                       &m_pipeline_reg[ID_OC_SP],
+									   &m_pipeline_reg[ID_OC_DP],
+                                       &m_pipeline_reg[ID_OC_SFU],
+									   &m_pipeline_reg[ID_OC_INT],
+                                       &m_pipeline_reg[ID_OC_TENSOR_CORE],
+                                       &m_pipeline_reg[ID_OC_MEM],
+                                       i
+                                     )
+                );
+                break;
+            case CONCRETE_SCHEDULER_KENDO:
+                schedulers.push_back(
+                    new kendo_scheduler( m_stats,
                                        this,
                                        m_scoreboard,
                                        m_simt_stack,
@@ -1108,7 +1126,8 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
     //schedulers[sch_id]->extended_buffer_print_contents();
     int slots_flushed = 0;
     for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
-        int i = j;//(j + ((get_sid()/2)%2)*32)%schedulers[sch_id]->extended_buffer_num_entries;
+        int i = j;
+        //int i = (j + ((get_sid()/2)%2)*32)%schedulers[sch_id]->extended_buffer_num_entries;
         new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
         if (addr != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
             warpId = schedulers[sch_id]->m_extended_buffer->warp_tracker[i];
@@ -2880,6 +2899,188 @@ void gwat_scheduler::order_warps()
                         else
                         {
                             //m_atomic_warps.push_back(m_next_cycle_prioritized_warps[i]);
+                            passed_atomic[m_next_cycle_prioritized_warps[i]->get_warp_id()/4]++;
+                            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                            i--;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool kendo_scheduler::check_buffer_stall()
+{
+    if(get_extended_buffer_full_stall()) 
+    {
+        return true;
+    }
+    
+    for(int warp_id = 0; warp_id < m_supervised_warps.size(); warp_id++)
+    {
+        if (!m_supervised_warps[warp_id]->functional_done())
+        {
+            if (m_supervised_warps[warp_id]->m_warps_exec == exec_to_check)
+            {
+                return false;
+            }
+        }
+    }
+    
+    return true;
+}
+
+void kendo_scheduler::do_on_warp_issued( unsigned warp_id, unsigned num_issued, const std::vector< shd_warp_t* >::const_iterator& prioritized_iter)
+{
+    m_stats->event_warp_issued( m_shader->get_sid(),
+                                warp_id,
+                                num_issued,
+                                warp(warp_id).get_dynamic_warp_id() );
+    
+    icounts[warp_id/4]++;
+    warp(warp_id).ibuffer_step();
+}
+
+void kendo_scheduler::do_on_warp_will_issue(int warp_id)
+{
+    //printf("Cycle %d: shader %d sch %d (%d) ", gpu_sim_cycle, m_shader->get_sid(), m_id, warp_id);
+    //for (int i = 0; i < 16; i++)
+    //{
+    //    printf("%d:%d ",i,  icounts[i]);
+    //}
+    //printf("\n");
+}
+
+bool kendo_scheduler::check_can_issue_atomic(int warp_id)
+{
+    int w_index = warp_id/4;
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        if (i != w_index && m_supervised_warps[i]->m_warps_exec > 0)
+        {
+            if ((m_supervised_warps[i]->m_warps_exec < m_supervised_warps[w_index]->m_warps_exec) && !m_supervised_warps[i]->functional_done())
+            {
+                return false;
+            }
+            else if ((m_supervised_warps[i]->m_warps_exec < m_supervised_warps[w_index]->m_warps_exec) && m_shader->more_ctas_to_run())
+            {
+                return false;
+            }
+            else if (m_supervised_warps[i]->m_warps_exec == m_supervised_warps[w_index]->m_warps_exec && !m_supervised_warps[i]->functional_done())
+            {
+                if (icounts[i] < icounts[w_index])
+                {
+                    return false;
+                }
+                else if (icounts[i] == icounts[w_index] && i < w_index)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    //printf("Cycle %d: shader %d sch %d (%d) ", gpu_sim_cycle, m_shader->get_sid(), m_id, warp_id);
+    //for (int i = 0; i < 16; i++)
+    //{
+    //    printf("%d:%d ",i,  icounts[i]);
+    //}
+    //printf("\n");
+    return true;
+}
+
+void kendo_scheduler::order_warps()
+{
+    // TODO find better way to do this
+    if (m_shader->get_kernel() == NULL)
+    {
+        return;
+    }
+    int k_id = m_shader->get_kernel()->get_uid();
+    // new kernel
+    if (k_id != kid)
+    {
+        for (int i = 0; i < m_supervised_warps.size(); i++)
+        {
+            m_supervised_warps[i]->m_warps_exec = 0;
+            m_prev[i] = -1;
+        }
+        kid = k_id;
+        exec_to_check = 1;
+    }
+
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        if (m_supervised_warps[i]->m_dynamic_cta_id != m_prev[i])
+        {
+            // initialize token
+            if (token_cta == -1)
+            {
+                token_cta = m_supervised_warps[i]->m_dynamic_cta_id;
+            }
+            m_prev[i] = m_supervised_warps[i]->m_dynamic_cta_id;
+            m_supervised_warps[i]->m_warps_exec++;
+            icounts[i] = 0;
+        }
+    }
+
+    // check if anything can still fill up the buffer
+    unsigned lowest_exec = 0xffffffff;
+    unsigned lowest_active_exec = 0xffffffff;
+    // check for lowest active tier
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        if (m_supervised_warps[i]->m_warps_exec > 0 && m_supervised_warps[i]->m_warps_exec < lowest_exec)
+        {
+            lowest_exec = m_supervised_warps[i]->m_warps_exec;
+        }
+
+        if (!m_supervised_warps[i]->functional_done() && m_supervised_warps[i]->m_warps_exec > 0 && m_supervised_warps[i]->m_warps_exec < lowest_active_exec)
+        {
+            lowest_active_exec = m_supervised_warps[i]->m_warps_exec;
+        }
+    }
+     // if there are more CTAs to run, check for lowest tier in general (even if they are done, higher tier ones cannot go with slot empty)
+    // if no more CTAs to run, just check active ones
+    exec_to_check = m_shader->more_ctas_to_run() ? lowest_exec : lowest_active_exec;
+    
+    order_by_priority( m_next_cycle_prioritized_warps,
+                       m_supervised_warps,
+                       m_last_supervised_issued,
+                       m_supervised_warps.size(),
+                       ORDERING_GREEDY_THEN_PRIORITY_FUNC,
+                       scheduler_unit::sort_warps_by_oldest_dynamic_id );
+
+    for (int i = 0; i < m_next_cycle_prioritized_warps.size(); i++)
+    {
+        if (m_next_cycle_prioritized_warps[i] == NULL)
+        {
+            m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+            i--;
+        }
+        else
+        {
+            int wid = m_next_cycle_prioritized_warps[i]->get_warp_id();
+
+            if (wid == -1)
+            {
+                m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                i--;
+            }
+            else
+            {
+                if (m_next_cycle_prioritized_warps[i]->done_exit() || m_next_cycle_prioritized_warps[i]->functional_done())
+                {
+                    m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
+                    i--;
+                }
+                else
+                {
+                    const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
+                    if (pI != NULL && pI->really_is_atomic)
+                    {
+                        if (!check_can_issue_atomic(wid))
+                        {
                             passed_atomic[m_next_cycle_prioritized_warps[i]->get_warp_id()/4]++;
                             m_next_cycle_prioritized_warps.erase(m_next_cycle_prioritized_warps.begin() + i);
                             i--;
