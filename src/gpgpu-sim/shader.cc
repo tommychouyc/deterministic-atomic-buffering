@@ -1285,7 +1285,7 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
 		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
 		    //m_icnt->push(mf);
             unsigned sub_partition_id = mf->get_sub_partition_id();
-            int cluster_id = m_sid / 40;
+            int cluster_id = m_sid % 40;
             g_the_gpu->mem_sub_partition_counts[sub_partition_id][cluster_id]++;
 
 

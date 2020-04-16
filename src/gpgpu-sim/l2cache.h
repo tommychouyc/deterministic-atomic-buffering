@@ -190,6 +190,70 @@ public:
         m_memcpy_cycle_offset += 1;
    }
 
+   std::bitset<40> cluster_inited;
+   std::bitset<40> cluster_write_req;
+   std::vector<int> remaining_addresses;
+   std::vector<std::vector<mem_fetch*>> reorder_buffers;
+   bool atomics;
+   int cluster_serviced;
+
+
+   unsigned long long reordered_atomics;
+
+   unsigned long long max_length_per_buffer[40];
+   unsigned long long max_length_total;
+
+   void print_reorder_stats()
+   {
+       printf("ID: %d\n", get_id());
+       printf("Max Entries: %d\tNumber of re-orderings: %d\n",max_length_total, reordered_atomics);
+       for (int i = 0; i < 40; i++)
+       {
+           printf("%d (%d)\n", i, max_length_per_buffer[i]);
+       }
+       reordered_atomics = 0;
+   }
+
+    void log_reorder_stats()
+    {
+        int tot = 0;
+        for (int i = 0; i < 40; i++)
+        {
+            tot += reorder_buffers[i].size();
+
+            if (reorder_buffers[i].size() > max_length_per_buffer[i])
+            {
+                max_length_per_buffer[i] = reorder_buffers[i].size();
+            }
+        }
+
+        if (tot > max_length_total)
+        {
+            max_length_total = tot;
+        }
+    }
+
+   void set_next_cluster_serviced()
+   {
+       for (int i = 0; i < 40; i++)
+       {
+           // look for next cluster to be serviced
+           int tested_cluster = (cluster_serviced + i + 1)%40;
+           if (remaining_addresses[tested_cluster] > 0)
+           {
+               cluster_serviced = tested_cluster;
+               return;
+           }
+       }
+
+       // all clusters done
+       atomics = 0;
+       cluster_inited.reset();
+       cluster_write_req.reset();
+   }
+
+    void push_atomic(unsigned long long cycle);
+
 private:
 // data
    unsigned m_id;  //< the global sub partition ID

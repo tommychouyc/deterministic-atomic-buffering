@@ -1253,6 +1253,11 @@ void gpgpu_sim::gpu_print_stat()
    printf("buffer_entries_reuse = %d\n",buffer_entries_reuse);
    printf("\n");
 
+   for (int i = 0; i < 48; i++)
+   {
+      m_memory_sub_partition[i]->print_reorder_stats(); 
+   }
+
    time_t curr_time;
    time(&curr_time);
    unsigned long long elapsed_time = MAX( curr_time - g_simulation_starttime, 1 );
@@ -1757,6 +1762,14 @@ void gpgpu_sim::cycle()
               m_memory_sub_partition[i]->push( mf, gpu_sim_cycle + gpu_tot_sim_cycle );
               if(mf)
             	  partiton_reqs_in_parallel_per_cycle++;
+
+               // interconnect empty, push new packet first
+               // TODO: prioritize reordered atomics to see if it decreases number of reorderings?
+               else
+               {
+                  m_memory_sub_partition[i]->push_atomic( gpu_sim_cycle + gpu_tot_sim_cycle );
+               }
+               
           }
           m_memory_sub_partition[i]->cache_cycle(gpu_sim_cycle+gpu_tot_sim_cycle);
           m_memory_sub_partition[i]->accumulate_L2cache_stats(m_power_stats->pwr_mem_stat->l2_cache_stats[CURRENT_STAT_IDX]);
@@ -1927,7 +1940,7 @@ void gpgpu_sim::cycle()
             buffer_stalled = true;
          }
 
-         if (buffer_stalled) { // Preparing the flush
+         if (buffer_stalled && m_extended_buffer_flush_reqs == 0) { // Preparing the flush
             //printf("Cycle: %u, Changed to Flushing state\n", gpu_sim_cycle);
             //flush_state = 1; // Next state = Flushing State
             flushing_counter_for_stall = 0;
