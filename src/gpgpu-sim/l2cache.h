@@ -209,9 +209,10 @@ public:
        printf("Max Entries: %d\tNumber of re-orderings: %d\n",max_length_total, reordered_atomics);
        for (int i = 0; i < 40; i++)
        {
-           printf("%d (%d)\n", i, max_length_per_buffer[i]);
+           printf("%d (%d)\t", i, max_length_per_buffer[i]);
        }
        reordered_atomics = 0;
+       printf("\n");
    }
 
     void log_reorder_stats()
@@ -235,12 +236,15 @@ public:
 
    void set_next_cluster_serviced()
    {
+       //printf("Partition %d ", get_id());
        for (int i = 0; i < 40; i++)
        {
            // look for next cluster to be serviced
            int tested_cluster = (cluster_serviced + i + 1)%40;
+          // printf("%i (%d) ", tested_cluster, reorder_buffers[tested_cluster].size());
            if (remaining_addresses[tested_cluster] > 0)
            {
+           // printf("\nCycle %d Partition %d moving %d to %d\n",0, get_id(), cluster_serviced, tested_cluster);
                cluster_serviced = tested_cluster;
                return;
            }
@@ -250,9 +254,10 @@ public:
        atomics = 0;
        cluster_inited.reset();
        cluster_write_req.reset();
+       //printf("\nCycle %d Partition %d Done\n",0, get_id());
    }
 
-    void push_atomic(unsigned long long cycle);
+    bool push_atomic(unsigned long long cycle);
 
 private:
 // data

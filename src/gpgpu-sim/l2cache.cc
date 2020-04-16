@@ -699,10 +699,10 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                         break;
                     }
                 }
-
+                //printf("Cycle %d Partition %d init done: ", gpu_sim_cycle, get_id());
                 for (int i = 0; i < 40; i++)
                 {
-                    //printf("%i (%i) ", i, remaining_addresses[i]);
+                //    printf("%i (%i) ", i, remaining_addresses[i]);
                 }
                 //printf("\n");
 
@@ -719,6 +719,8 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
 
         if (m_req->get_inst().op == ATOMIC_OP)
         {
+            //printf("Partition %d: ", get_id());
+            //m_req->print(stdout);
             // packet arrived early before settling (still waiting on buffer count packets)
             if (!atomics)
             {
@@ -735,13 +737,19 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                 // packet arrived "out of order"
                 if (cluster != cluster_serviced)
                 {
-                    //printf("Cycle %d: cluster_seviced: %d, cluster: %d stashing ", gpu_sim_cycle, cluster_serviced, cluster);
-                    // m_req->print(stdout);
+                    //printf("Cycle %d: Partition %d cluster_seviced: %d, cluster: %d size: %d stashing ", gpu_sim_cycle, get_id(), cluster_serviced, cluster);
+                    //m_req->print(stdout);
                     //printf("\n");
                     reorder_buffers[cluster].push_back(m_req);
                     reordered_atomics++;
                     log_reorder_stats();
                     return;
+                }
+                else if (reorder_buffers[cluster].size() > 0)
+                {
+                    reorder_buffers[cluster].push_back(m_req);
+                    m_req = reorder_buffers[cluster].front();
+                    reorder_buffers[cluster].erase(reorder_buffers[cluster].begin());
                 }
             }
         }
@@ -764,27 +772,31 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
 				m_rop.push(r);
 				req->set_status(IN_PARTITION_ROP_DELAY,gpu_sim_cycle+gpu_tot_sim_cycle);
 
-                // mark packet as serviced
-                if (m_req->get_inst().op == ATOMIC_OP)
-                {
-                    //printf("Cycle %d: Partition %d Cluster %d ", cycle, get_id(), cluster_serviced);
-                    //m_req->print(stdout);
-                    
-                    remaining_addresses[cluster_serviced]--;
-                    set_next_cluster_serviced();
-                }
+                
 			}
     	}
+        // mark packet as serviced
+        if (m_req->get_inst().op == ATOMIC_OP)
+        {
+            //printf("Cycle %d: Partition %d Cluster %d ", cycle, get_id(), cluster_serviced);
+            //m_req->print(stdout);
+                    
+            remaining_addresses[cluster_serviced]--;
+            set_next_cluster_serviced();
+        }
     }
 }
 
-void memory_sub_partition::push_atomic(unsigned long long cycle)
+bool memory_sub_partition::push_atomic(unsigned long long cycle)
 {
-    if (!atomics || remaining_addresses[cluster_serviced] == 0 || reorder_buffers[cluster_serviced].size() == 0)
+    if (!atomics || reorder_buffers[cluster_serviced].size() == 0)// || remaining_addresses[cluster_serviced] == 0 || reorder_buffers[cluster_serviced].size() == 0)
     {
-        return;
+        return false;
     }
-    //printf("Cycle %d: Partition %d Cluster %d (DELAYED) ", cycle, get_id(), cluster_serviced);
+    assert(remaining_addresses[cluster_serviced] > 0);
+    assert(remaining_addresses[cluster_serviced] >= reorder_buffers[cluster_serviced].size());
+
+    //printf("Cycle %d: Partition %d Cluster %d (DELAYED) Remaining %d ", cycle, get_id(), cluster_serviced, reorder_buffers[cluster_serviced].size());
     
     mem_fetch* m_req = reorder_buffers[cluster_serviced].front();
     //m_req->print(stdout);
@@ -813,6 +825,7 @@ void memory_sub_partition::push_atomic(unsigned long long cycle)
 		}
 	}
     set_next_cluster_serviced();
+    return true;
 }
 
 mem_fetch* memory_sub_partition::pop() 

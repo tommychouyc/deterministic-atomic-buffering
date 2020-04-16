@@ -1232,10 +1232,10 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
         new_count = count;
     }
 
-    if(m_icnt->full(40*new_count,true)){ // used to be just 32, 40 is flit size
+    //if(m_icnt->full(40*new_count,true)){ // used to be just 32, 40 is flit size
         //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
-        return -2;
-    }
+    //    return -2;
+    //}
     //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d (shader %d Sch %d) @@@@@@@@@@@\n", count, get_sid(), sch_id);
     //schedulers[sch_id]->extended_buffer_print_contents();
     int slots_flushed = 0;
