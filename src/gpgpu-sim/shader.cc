@@ -1287,6 +1287,7 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
             unsigned sub_partition_id = mf->get_sub_partition_id();
             int cluster_id = m_sid % 40;
             g_the_gpu->mem_sub_partition_counts[sub_partition_id][cluster_id]++;
+            delete mf;
 
 
             //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
