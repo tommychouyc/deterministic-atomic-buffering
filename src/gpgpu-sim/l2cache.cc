@@ -714,6 +714,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                     atomics = false;
                 }
             }
+            delete m_req;
             return;
         }
 

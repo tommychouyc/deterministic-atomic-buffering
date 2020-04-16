@@ -1761,8 +1761,9 @@ void gpgpu_sim::cycle()
              if (!m_memory_sub_partition[i]->push_atomic( gpu_sim_cycle + gpu_tot_sim_cycle ))
              {
               mem_fetch* mf = (mem_fetch*) icnt_pop( m_shader_config->mem2device(i) );
+              bool mf_valid = (mf != NULL);
               m_memory_sub_partition[i]->push( mf, gpu_sim_cycle + gpu_tot_sim_cycle );
-              if(mf)
+              if(mf_valid)
             	  partiton_reqs_in_parallel_per_cycle++;
              }
                // interconnect empty, push new packet first
