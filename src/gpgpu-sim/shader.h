@@ -681,6 +681,26 @@ public:
         return buffer_mem_access;
     }
 
+    mem_access_t extended_buffer_generate_mem_access_for_entry_from_info(new_addr_type & addr, const warp_inst_t::transaction_info& info) {
+        mem_access_type access_type = GLOBAL_ACC_R;
+        //new_addr_type addr = m_extended_buffer->address_list[0];
+        unsigned int size = 32; // in our case equals segment_size
+        bool is_write = false;
+        unsigned chunk = (addr&127)/32; // which 32-byte chunk within in a 128-byte chunk does this thread access?
+        unsigned thread = 1;
+        //info.chunks.set(chunk);
+        //info.active.set(thread);
+        //unsigned idx = (addr&127);
+        //unsigned int data_size = 4;
+        //for( unsigned i=0; i < data_size; i++ ) {
+        //    //assert(!info.bytes.test(idx+i));
+        //    //info.bytes.set(idx+i);
+        //    info.bytes.set(i);
+        //}
+        mem_access_t buffer_mem_access = mem_access_t(access_type,addr,size,is_write,info.active,info.bytes,info.chunks);
+        return buffer_mem_access;
+    }
+
     mem_access_t extended_buffer_generate_useless_mem_access( int counts ) {
         mem_access_type access_type = GLOBAL_ACC_R;
         new_addr_type addr = counts;
