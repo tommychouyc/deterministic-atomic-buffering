@@ -725,7 +725,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             // packet arrived early before settling (still waiting on buffer count packets)
             if (!atomics)
             {
-                int cluster = m_req->get_sid()%40;
+                int cluster = m_req->get_sid()/2;
                 reorder_buffers[cluster].push_back(m_req);
                 reordered_atomics++;
                 log_reorder_stats();
@@ -733,7 +733,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             }
             else
             {
-                int cluster = m_req->get_sid()%40;
+                int cluster = m_req->get_sid()/2;
                 
                 // packet arrived "out of order"
                 if (cluster != cluster_serviced)

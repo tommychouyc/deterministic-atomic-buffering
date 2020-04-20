@@ -488,8 +488,9 @@ void shader_core_config::reg_options(class OptionParser * opp)
     option_parser_register(opp, "-flush_chunk_size", OPT_INT32, &flush_chunk_size,
                             "How many buffer entries to flush each cycle (default=32)",
                             "32");
-   option_parser_register(opp, "-buffer_coalesce", OPT_BOOL, &coalesce, "Coalesce atomics (default=0)", "0");
+   option_parser_register(opp, "-buffer_coalesce", OPT_BOOL, &coalesce, "Fuse atomics (default=0)", "0");
    option_parser_register(opp, "-buffer_stall_early", OPT_BOOL, &stall_early, "Set stall flag early (default=0)", "0");
+   option_parser_register(opp, "-atomic_coalesce", OPT_BOOL, &atom_coalesce, "Actually coalesce atomics (default=1)", "1");
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)
@@ -2019,8 +2020,8 @@ void gpgpu_sim::cycle()
                }
                for (int i = 0; i < 48; i++){ // print counts and send counts
                   for (int j = 0; j < 40; j++){
-                     printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]/2);
-                     m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j]/2);
+                     printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
+                     m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j]);
                      mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
                   }
                }

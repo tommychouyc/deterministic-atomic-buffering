@@ -113,6 +113,7 @@ public:
     std::vector<bool> flushed;
     unsigned int warp_execed;
     std::vector<int> warp_tracker; // for schduler level buffers: tracks the last warp in that shader that uses a buffer entry so it doesnt exit and not process the flush ack
+    std::vector<mem_fetch*> mem_fetches;
 };
 
 class shd_warp_t {
@@ -2421,6 +2422,7 @@ struct shader_core_config : public core_config
     // BUFFERS
     bool coalesce;
     bool stall_early;
+    bool atom_coalesce;
 };
 
 struct shader_core_stats_pod {
