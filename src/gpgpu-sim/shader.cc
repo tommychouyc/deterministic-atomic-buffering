@@ -1190,6 +1190,11 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         {
            new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
 
+           if (addr == 0 || schedulers[sch_id]->m_extended_buffer->flushed[i])
+           {
+               continue;
+           }
+
            unsigned int block_address = addr & ~(32-1); //line_size_based_tag_func(addr,32);
            unsigned chunk = (addr&127)/32; // which 32-byte chunk within in a 128-byte chunk does this thread access?
 
@@ -1300,6 +1305,8 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             //schedulers[sch_id]->m_extended_buffer->flushed[2*i + 1] = true;
        }
        assert(slots_addressed == new_count);
+       g_the_gpu->tot_slots_used += new_count;
+       g_the_gpu->tot_transactions += total_transactions.size();
        return slots_flushed;
 
     }
@@ -1512,6 +1519,10 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
         // WARNING: ONLY WORKS FOR ATOMIC FUSION
         for(int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++) 
         {
+           if (schedulers[sch_id]->m_extended_buffer->address_list[i] == 0 || schedulers[sch_id]->m_extended_buffer->flushed[i])
+           {
+               continue;
+           }
            new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
 
            unsigned int block_address = addr & ~(32-1); //line_size_based_tag_func(addr,32);

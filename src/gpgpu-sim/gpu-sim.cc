@@ -490,7 +490,7 @@ void shader_core_config::reg_options(class OptionParser * opp)
                             "32");
    option_parser_register(opp, "-buffer_coalesce", OPT_BOOL, &coalesce, "Fuse atomics (default=0)", "0");
    option_parser_register(opp, "-buffer_stall_early", OPT_BOOL, &stall_early, "Set stall flag early (default=0)", "0");
-   option_parser_register(opp, "-atomic_coalesce", OPT_BOOL, &atom_coalesce, "Actually coalesce atomics (default=1)", "1");
+   option_parser_register(opp, "-atomic_coalesce", OPT_BOOL, &atom_coalesce, "Actually coalesce atomics (default=0)", "0");
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)
@@ -819,6 +819,9 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
    buffer_flush_cycles = 0;
    tot_buffer_flush_cycles = 0;
    buffer_entries_reuse = 0;
+
+   tot_transactions = 0;
+   tot_slots_used = 0;
 
    for (int i = 0; i < 48; i++){
       for(int j = 0; j < 40; j++){
@@ -1252,6 +1255,9 @@ void gpgpu_sim::gpu_print_stat()
    printf("buffer_flush_cycles = %lld\n", buffer_flush_cycles);
    printf("tot_buffer_flush_cycles = %lld\n", tot_buffer_flush_cycles);
    printf("buffer_entries_reuse = %d\n",buffer_entries_reuse);
+   printf("tot_transactions = %lld\n", tot_transactions);
+   printf("tot_slots_used = %d\n",tot_slots_used);
+   printf("coalescing_ratio = %.4f\n", ((float) tot_transactions)/((float) tot_slots_used));
    printf("\n");
 
    for (int i = 0; i < 48; i++)

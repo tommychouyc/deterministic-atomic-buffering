@@ -600,6 +600,10 @@ public:
    unsigned long long buffer_flush_cycles;
    unsigned long long tot_buffer_flush_cycles;
    int buffer_entries_reuse; // tracks coalescing
+   
+   // tracks real coalescing
+   unsigned long long tot_transactions;
+   unsigned long long tot_slots_used;
 
    unsigned long long  gpu_sim_insn;
    unsigned long long  gpu_tot_sim_insn;
