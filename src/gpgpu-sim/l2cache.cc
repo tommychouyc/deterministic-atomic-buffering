@@ -779,7 +779,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
         // mark packet as serviced
         if (m_req->get_inst().op == ATOMIC_OP)
         {
-            //printf("Cycle %d: Partition %d Cluster %d ", cycle, get_id(), cluster_serviced);
+            //printf("Cycle %d: Partition %d Cluster %d\n", cycle, get_id(), cluster_serviced);
             //m_req->print(stdout);
                     
             remaining_addresses[cluster_serviced]--;
@@ -797,7 +797,7 @@ bool memory_sub_partition::push_atomic(unsigned long long cycle)
     assert(remaining_addresses[cluster_serviced] > 0);
     assert(remaining_addresses[cluster_serviced] >= reorder_buffers[cluster_serviced].size());
 
-    //printf("Cycle %d: Partition %d Cluster %d (DELAYED) Remaining %d ", cycle, get_id(), cluster_serviced, reorder_buffers[cluster_serviced].size());
+    //printf("Cycle %d: Partition %d Cluster %d (DELAYED) Remaining %d\n", cycle, get_id(), cluster_serviced, reorder_buffers[cluster_serviced].size());
     
     mem_fetch* m_req = reorder_buffers[cluster_serviced].front();
     //m_req->print(stdout);

@@ -2053,6 +2053,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             return false; // not enough space
         }
         schedulers[sch_id]->m_extended_buffer->warp_execed =  schedulers[sch_id]->m_supervised_warps[warp_id/4]->m_warps_exec;
+        // printf("Cycle %u Shader %d CTA %d scheduler %d warp %d issued\n", gpu_sim_cycle, get_sid(), m_warp[warp_id].m_dynamic_cta_id, sch_id, warp_id);
         //printf("%d Shader %d Warp %d atomic issued\n", gpu_sim_cycle, get_sid(), warp_id);
         //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), schedulers[sch_id]->extended_buffer_locations_remaining());
         //printf("####################### END ISSUE_WARP #######################\n\n");
@@ -3147,11 +3148,32 @@ bool gtar_scheduler::check_buffer_stall()
         return true;
     }
     
+    unsigned lowest_active = 0xffffffff;
+    unsigned lowest_total = 0xffffffff;
+    for (int i = 0; i < m_supervised_warps.size(); i++)
+    {
+        if (m_supervised_warps[i]->m_warps_exec != 0 && !m_supervised_warps[i]->functional_done() && m_supervised_warps[i]->m_warps_exec < lowest_active)
+        {
+            lowest_active = m_supervised_warps[i]->m_warps_exec;
+        }
+        if (m_supervised_warps[i]->m_warps_exec != 0 && m_supervised_warps[i]->m_warps_exec < lowest_total)
+        {
+            lowest_total = m_supervised_warps[i]->m_warps_exec;
+        }
+    }
+
+    if (!m_shader->get_kernel())
+    {
+        return true;
+    }
+
+    unsigned warp_exec_check = m_shader->get_kernel()->no_more_ctas_to_run() ? lowest_active : lowest_total;
+    
     for(int warp_id = 0; warp_id < m_supervised_warps.size(); warp_id++)
     {
         if (!m_supervised_warps[warp_id]->functional_done())
         {
-            if (m_supervised_warps[warp_id]->m_warps_exec == curr_warp_exec)
+            if (m_supervised_warps[warp_id]->m_warps_exec == warp_exec_check)
             {
                 return false;
             } 
