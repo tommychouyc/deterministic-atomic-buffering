@@ -1118,7 +1118,6 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
     else{
         new_count = count;
     }
-
     if (!m_config->atom_coalesce)
     {
         if(m_icnt->full(40*new_count,true))
@@ -1126,6 +1125,17 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
             return -2;
         }
+
+        if (g_the_gpu->entries_per_buffer.size() < schedulers[sch_id]->m_extended_buffer->warp_execed)
+        {
+            std::vector<unsigned> new_vec(320, 0);
+            g_the_gpu->entries_per_buffer.push_back(new_vec);
+        }
+
+        unsigned entry_count_index = m_sid*4 + sch_id;
+        g_the_gpu->entries_per_buffer[schedulers[sch_id]->m_extended_buffer->warp_execed-1][entry_count_index] += new_count;
+
+        // g_the_gpu->entries_per_buffer[m_sid][sch_id][schedulers[sch_id]->m_extended_buffer->warp_execed-1] += new_count;
 
         int slots_flushed = 0;
         for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
@@ -1230,11 +1240,20 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             }
         }
         
-        printf("MAP SIZE: %d\n", total_transactions.size());
         if(m_icnt->full(40*total_transactions.size(),true)){ // used to be just 32, 40 is flit size
             //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
             return -2;
         }
+        printf("MAP SIZE: %d\n", total_transactions.size());
+
+        if (g_the_gpu->entries_per_buffer.size() < schedulers[sch_id]->m_extended_buffer->warp_execed)
+        {
+            std::vector<unsigned> new_vec(320, 0);
+            g_the_gpu->entries_per_buffer.push_back(new_vec);
+        }
+
+        unsigned entry_count_index = m_sid*4 + sch_id;
+        g_the_gpu->entries_per_buffer[schedulers[sch_id]->m_extended_buffer->warp_execed-1][entry_count_index] += new_count;
 
         // should really be mem_fetches sent
         int slots_flushed = 0;
@@ -1784,7 +1803,7 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
     //return slots_flushed;
 }
 
-int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, unsigned cluster, int counts) {
+int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, unsigned cluster, int counts, int shaders) {
     if(m_icnt->full(40,true)){ 
         //printf("Sub partition: %d, Interconnect full when trying to push sub parttion counts\n", sub_partition_id);
         return -2;
@@ -1798,11 +1817,11 @@ int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, un
     inst->set_space(global_space);
     inst->set_memory_op(no_memory_op);
     inst->set_data_size(32); // not sure if 32
-    inst->set_m_warp_id(0); // maybe
+    inst->set_m_warp_id(shaders); // maybe
     inst->set_m_scheduler_id(0);
     inst->set_m_empty(false);
 
-    mem_fetch *mf = new mem_fetch(counts_mem_access, inst, WRITE_PACKET_SIZE, 0, 0, cluster, m_memory_config); //??
+    mem_fetch *mf = new mem_fetch(counts_mem_access, inst, WRITE_PACKET_SIZE, shaders, 0, cluster, m_memory_config); //??
     mf->set_sub_partition_id(sub_partition_id);
     mf->set_mf_type(BUFFER_COUNTS);
     m_icnt->push(mf);

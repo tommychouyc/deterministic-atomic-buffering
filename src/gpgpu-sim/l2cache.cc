@@ -348,6 +348,7 @@ memory_sub_partition::memory_sub_partition( unsigned sub_partition_id,
     reordered_atomics = 0;
     atomics = 0;
     cluster_serviced = 0;
+    expected_flush_messages = -1;
 }
 
 memory_sub_partition::~memory_sub_partition()
@@ -677,6 +678,16 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
 
         if(m_req->get_type() == BUFFER_COUNTS){
             int cluster = m_req->get_tpc();
+            
+            int messages_to_expect = 40;
+
+            if (g_the_gpu->m_shader_config->less_messages)
+            {
+                messages_to_expect = m_req->get_wid();
+                assert(expected_flush_messages == -1 || messages_to_expect == m_req->get_wid());
+                expected_flush_messages = messages_to_expect;
+            }
+
             //printf("Cycle %d partition %d: initializing %d to %d\n", gpu_sim_cycle,get_id(), cluster,m_req->get_addr());
             assert(!cluster_inited[cluster]);
             remaining_addresses[cluster] = m_req->get_addr();
@@ -687,7 +698,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             }
 
             // all buffer count packets arrive, start enforcing order
-            if (cluster_inited.count() == 40)
+            if (cluster_inited.count() == messages_to_expect)
             {
                 atomics = true;
 
@@ -744,7 +755,13 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                     reorder_buffers[cluster].push_back(m_req);
                     reordered_atomics++;
                     log_reorder_stats();
-                    return;
+
+                    if (reorder_buffers[cluster_serviced].size() == 0)
+                    {
+                        return;
+                    }
+                    m_req = reorder_buffers[cluster_serviced].front();
+                    reorder_buffers[cluster_serviced].erase(reorder_buffers[cluster_serviced].begin());
                 }
                 else if (reorder_buffers[cluster].size() > 0)
                 {

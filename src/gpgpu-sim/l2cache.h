@@ -196,6 +196,7 @@ public:
    std::vector<std::vector<mem_fetch*>> reorder_buffers;
    bool atomics;
    int cluster_serviced;
+   int expected_flush_messages;
 
 
    unsigned long long reordered_atomics;
@@ -254,6 +255,7 @@ public:
        atomics = 0;
        cluster_inited.reset();
        cluster_write_req.reset();
+       expected_flush_messages = -1;
        //printf("\nCycle %d Partition %d Done\n",0, get_id());
    }
 

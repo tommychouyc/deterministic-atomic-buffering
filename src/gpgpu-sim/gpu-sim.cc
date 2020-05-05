@@ -491,6 +491,7 @@ void shader_core_config::reg_options(class OptionParser * opp)
    option_parser_register(opp, "-buffer_coalesce", OPT_BOOL, &coalesce, "Fuse atomics (default=0)", "0");
    option_parser_register(opp, "-buffer_stall_early", OPT_BOOL, &stall_early, "Set stall flag early (default=0)", "0");
    option_parser_register(opp, "-atomic_coalesce", OPT_BOOL, &atom_coalesce, "Actually coalesce atomics (default=0)", "0");
+   option_parser_register(opp, "-less_messages", OPT_BOOL, &less_messages, "Send less flush messages (default=0)", "0");
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)
@@ -822,12 +823,24 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
 
    tot_transactions = 0;
    tot_slots_used = 0;
+   waiting_for_acks = 0;
 
    for (int i = 0; i < 48; i++){
       for(int j = 0; j < 40; j++){
          mem_sub_partition_counts[i][j] = 0;
       }
    }
+
+   //for (int i = 0; i < 80; i++)
+   //{
+   //   for (int j = 0; j < 4; j++)
+   //   {
+   //      for (int k = 0; k < 2; k++)
+   //      {
+   //         entries_per_buffer[i][j][k] = 0;
+   //      }
+   //   }
+   //}
    
 }
 
@@ -1258,12 +1271,32 @@ void gpgpu_sim::gpu_print_stat()
    printf("tot_transactions = %lld\n", tot_transactions);
    printf("tot_slots_used = %d\n",tot_slots_used);
    printf("coalescing_ratio = %.4f\n", ((float) tot_transactions)/((float) tot_slots_used));
+   printf("waiting_for_acks = %lld\n", waiting_for_acks);
    printf("\n");
 
    for (int i = 0; i < 48; i++)
    {
       m_memory_sub_partition[i]->print_reorder_stats(); 
    }
+
+   // TODO: make general
+   printf("Entries per Buffer:\n");
+   for (int i = 0; i < entries_per_buffer.size(); i++)
+   {
+      for (int j = 0; j < 80; j++)
+      {
+         printf("%d\t", j);
+         for (int k = 0; k < 4; k++)
+         {
+            printf("%d\t", entries_per_buffer[i][j*4 + k]);
+            entries_per_buffer[i][j*4 + k] = 0;
+         }
+         printf("\n");
+      }
+      printf("\n");
+   }
+   
+   printf("\n");
 
    time_t curr_time;
    time(&curr_time);
@@ -1939,6 +1972,8 @@ void gpgpu_sim::cycle()
       int num_flushed_from_stall = 0;
       int flushed_from_stall = 0;
       int rounds_needed = num_buffer_entries / flush_chunk_size; // set chunk size here
+      std::bitset<40> flushing_clusters;
+      flushing_clusters.reset();
 
       if (flush_state == 0) { // Idle / Checking state
          for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
@@ -1950,6 +1985,11 @@ void gpgpu_sim::cycle()
                break;
             }
             buffer_stalled = true;
+         }
+
+         if (buffer_stalled && m_extended_buffer_flush_reqs)
+         {
+            waiting_for_acks++;
          }
 
          if (buffer_stalled && m_extended_buffer_flush_reqs == 0) { // Preparing the flush
@@ -2022,12 +2062,16 @@ void gpgpu_sim::cycle()
                   cluster_to_flush_for_stall = flush_list[buffer].x;
                   core_to_flush_for_stall = flush_list[buffer].y;
                   sch_to_flush_for_stall = flush_list[buffer].z;
+                  flushing_clusters.set(cluster_to_flush_for_stall);                  
                   m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_count_mem_sub_partition_sch_level(sch_to_flush_for_stall);
                }
                for (int i = 0; i < 48; i++){ // print counts and send counts
                   for (int j = 0; j < 40; j++){
-                     printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
-                     m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j]);
+                     if (!m_shader_config->less_messages || flushing_clusters[j])
+                     {
+                        printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
+                        m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j], flushing_clusters.count());
+                     }
                      mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
                   }
                }

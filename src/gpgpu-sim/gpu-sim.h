@@ -493,6 +493,7 @@ public:
     */
     simt_core_cluster * getSIMTCluster();
 
+   const struct shader_core_config *m_shader_config;
 
 private:
    // clocks
@@ -539,7 +540,6 @@ private:
    const gpgpu_sim_config &m_config;
   
    const struct cudaDeviceProp     *m_cuda_properties;
-   const struct shader_core_config *m_shader_config;
    const struct memory_config      *m_memory_config;
 
    // stats
@@ -573,6 +573,9 @@ public:
 
    int mem_sub_partition_counts [48][40];
 
+   // unsigned entries_per_buffer[80][4][2];
+   std::vector<std::vector<unsigned>> entries_per_buffer;
+
    int flushing_counter_for_stall;
    int cluster_to_flush_for_stall;
    int core_to_flush_for_stall;
@@ -580,6 +583,8 @@ public:
    int sch_to_flush_for_stall;
    int chunk_to_flush_for_stall;
    int long_flushing_counter_for_stall;
+
+   unsigned long long waiting_for_acks;
 
    // for kernel exit flush
    int flushing_counter; // mod this number to find cluster, core, and warp id
