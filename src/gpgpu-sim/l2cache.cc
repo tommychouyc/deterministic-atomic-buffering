@@ -755,7 +755,9 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                     reorder_buffers[cluster].push_back(m_req);
                     reordered_atomics++;
                     log_reorder_stats();
-
+                    //return;
+                    assert(remaining_addresses[cluster_serviced] > 0);
+                    
                     if (reorder_buffers[cluster_serviced].size() == 0)
                     {
                         return;

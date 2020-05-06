@@ -831,6 +831,13 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
       }
    }
 
+   for (int i = 0; i < 48; i++)
+   {
+      std::bitset<40> bs;
+      bs.reset();
+      flush_message_pushed.push_back(bs);
+   }
+
    //for (int i = 0; i < 80; i++)
    //{
    //   for (int j = 0; j < 4; j++)
@@ -2065,14 +2072,30 @@ void gpgpu_sim::cycle()
                   flushing_clusters.set(cluster_to_flush_for_stall);                  
                   m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_count_mem_sub_partition_sch_level(sch_to_flush_for_stall);
                }
+               for (int i = 0; i < 48; i++)
+               {
+                  flush_message_pushed[i].reset();
+               }
                for (int i = 0; i < 48; i++){ // print counts and send counts
                   for (int j = 0; j < 40; j++){
                      if (!m_shader_config->less_messages || flushing_clusters[j])
                      {
-                        printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
-                        m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j], flushing_clusters.count());
+                        if (m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j], flushing_clusters.count()) > 0)
+                        {
+                           printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
+                           mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
+                           flush_message_pushed[i].set(j);
+                        }
                      }
-                     mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
+                  }
+               }
+
+               for (int i = 0; i < 48; i++)
+               {
+                  if (flush_message_pushed[i].count() < 40)
+                  {
+                     flush_state = 2;
+                     break;
                   }
                }
             }
@@ -2083,6 +2106,38 @@ void gpgpu_sim::cycle()
          else {
             flush_state = 0; // keep checking
          }
+      }
+      else if (flush_state == 2)
+      {
+         bool flushed_all = true;
+         for (int i = 0; i < 48; i++)
+         { // print counts and send counts
+            for (int j = 0; j < 40; j++){
+               if (!flush_message_pushed[i][j])
+               {
+                  if (!m_shader_config->less_messages || flushing_clusters[j])
+                  {
+                     if (m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j], flushing_clusters.count()) > 0)
+                     {
+                        printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
+                        mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
+                        flush_message_pushed[i].set(j);
+                     }
+                  }
+               }
+            }
+         }
+
+         for (int i = 0; i < 48; i++)
+         {
+            if (flush_message_pushed[i].count() < 40)
+            {
+               flushed_all = false;
+               break;
+            }
+         }
+         
+         flush_state = flushed_all ? 1 : 2;
       }
       else if (flush_state == 1) { // Flushing State
          buffer_flush_cycles++;

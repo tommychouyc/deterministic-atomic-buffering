@@ -576,6 +576,8 @@ public:
    // unsigned entries_per_buffer[80][4][2];
    std::vector<std::vector<unsigned>> entries_per_buffer;
 
+   std::vector<std::bitset<40>> flush_message_pushed;
+
    int flushing_counter_for_stall;
    int cluster_to_flush_for_stall;
    int core_to_flush_for_stall;
