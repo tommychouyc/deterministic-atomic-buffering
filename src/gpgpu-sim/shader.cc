@@ -1244,7 +1244,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
             return -2;
         }
-        printf("MAP SIZE: %d\n", total_transactions.size());
+        printf("MAP SIZE: %d->%d\n", new_count, total_transactions.size());
 
         if (g_the_gpu->entries_per_buffer.size() < schedulers[sch_id]->m_extended_buffer->warp_execed)
         {

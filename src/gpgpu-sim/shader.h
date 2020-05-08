@@ -2424,6 +2424,7 @@ struct shader_core_config : public core_config
     bool stall_early;
     bool atom_coalesce;
     bool less_messages;
+    bool overlap_flushes;
 };
 
 struct shader_core_stats_pod {

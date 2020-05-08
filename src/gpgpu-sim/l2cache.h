@@ -198,8 +198,13 @@ public:
    int cluster_serviced;
    int expected_flush_messages;
 
+   std::vector<std::vector<unsigned>> remaining_addr_queue;
+
 
    unsigned long long reordered_atomics;
+
+    unsigned long long max_length_per_addr_queue[40];
+    unsigned long long max_queue_length_total;
 
    unsigned long long max_length_per_buffer[40];
    unsigned long long max_length_total;
@@ -235,6 +240,35 @@ public:
         }
     }
 
+    void print_addr_queue_stats()
+   {
+       printf("ID: %d\n", get_id());
+       printf("Max Entries: %d\n",max_queue_length_total);
+       for (int i = 0; i < 40; i++)
+       {
+           printf("%d (%d)\t", i, max_length_per_addr_queue[i]);
+       }
+       printf("\n");
+   }
+
+    void log_queue_stats()
+    {
+        int tot = 0;
+        for (int i = 0; i < 40; i++)
+        {
+            tot += remaining_addr_queue[i].size();
+
+            if (remaining_addr_queue[i].size() > max_length_per_addr_queue[i])
+            {
+                max_length_per_addr_queue[i] = remaining_addr_queue[i].size();
+            }
+        }
+        if (tot > max_queue_length_total)
+        {
+            max_queue_length_total = tot;
+        }
+    }
+
    void set_next_cluster_serviced()
    {
        //printf("Partition %d ", get_id());
@@ -251,11 +285,50 @@ public:
            }
        }
 
-       // all clusters done
+       // all clusters done, check if there is already another set of flush messages queued up
+        // check if all messages arrived for given flush
+        bool everything_arrived = true;
+        for (int i = 0; i < 40; i++)
+        {
+            if (remaining_addr_queue[i].size() == 0)
+            {
+                everything_arrived = false;
+                break;
+            }
+        }
+
+        // if so, start reordering atomics again
+        if (everything_arrived)
+        {
+            // set remaining addr and first cluster
+            bool expect_nothing = true;
+            for (int i = 0; i < 40; i++)
+            {
+                assert(remaining_addr_queue.size() > 0);
+                remaining_addresses[i] = remaining_addr_queue[i].front();
+                remaining_addr_queue[i].erase(remaining_addr_queue[i].begin());
+            }
+            for (int i = 0; i < 40; i++)
+            {
+                if (remaining_addresses[i] > 0)
+                {
+                    cluster_serviced = i;
+                    expect_nothing = false;
+                    break;
+                }
+            }
+            atomics = !expect_nothing;
+        }
+        else
+        {
+            atomics = false;
+        }
+
+        /*
        atomics = 0;
        cluster_inited.reset();
        cluster_write_req.reset();
-       expected_flush_messages = -1;
+       expected_flush_messages = -1;*/
        //printf("\nCycle %d Partition %d Done\n",0, get_id());
    }
 

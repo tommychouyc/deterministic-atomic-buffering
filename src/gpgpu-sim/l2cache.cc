@@ -342,9 +342,12 @@ memory_sub_partition::memory_sub_partition( unsigned sub_partition_id,
     {
         remaining_addresses.push_back(0);
         reorder_buffers.push_back(std::vector<mem_fetch*>());
+        remaining_addr_queue.push_back(std::vector<unsigned>());
         max_length_per_buffer[i] = 0;
+        max_length_per_addr_queue[i] = 0;
     }
     max_length_total = 0;
+    max_queue_length_total = 0; 
     reordered_atomics = 0;
     atomics = 0;
     cluster_serviced = 0;
@@ -680,7 +683,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             int cluster = m_req->get_tpc();
             
             int messages_to_expect = 40;
-
+            /*
             if (g_the_gpu->m_shader_config->less_messages)
             {
                 messages_to_expect = m_req->get_wid();
@@ -724,7 +727,46 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                     cluster_inited.reset();
                     atomics = false;
                 }
+            }*/
+            remaining_addr_queue[cluster].push_back(m_req->get_addr());
+            log_queue_stats();
+            if (!atomics)
+            {
+                // check if all messages arrived for given flush
+                bool everything_arrived = true;
+                for (int i = 0; i < 40; i++)
+                {
+                    if (remaining_addr_queue[i].size() == 0)
+                    {
+                        everything_arrived = false;
+                        break;
+                    }
+                }
+
+                // if so, start reordering atomics
+                if (everything_arrived)
+                {
+                    // set remaining addr and first cluster
+                    bool expect_nothing = true;
+                    for (int i = 0; i < 40; i++)
+                    {
+                        assert(remaining_addr_queue.size() > 0);
+                        remaining_addresses[i] = remaining_addr_queue[i].front();
+                        remaining_addr_queue[i].erase(remaining_addr_queue[i].begin());
+                    }
+                    for (int i = 0; i < 40; i++)
+                    {
+                        if (remaining_addresses[i] > 0)
+                        {
+                            cluster_serviced = i;
+                            expect_nothing = false;
+                            break;
+                        }
+                    }
+                    atomics = !expect_nothing;
+                }
             }
+
             delete m_req;
             return;
         }
@@ -767,6 +809,8 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                 }
                 else if (reorder_buffers[cluster].size() > 0)
                 {
+                    assert(remaining_addresses[cluster_serviced] > 0);
+                    reordered_atomics++;
                     reorder_buffers[cluster].push_back(m_req);
                     m_req = reorder_buffers[cluster].front();
                     reorder_buffers[cluster].erase(reorder_buffers[cluster].begin());
@@ -814,7 +858,7 @@ bool memory_sub_partition::push_atomic(unsigned long long cycle)
         return false;
     }
     assert(remaining_addresses[cluster_serviced] > 0);
-    assert(remaining_addresses[cluster_serviced] >= reorder_buffers[cluster_serviced].size());
+    // assert(remaining_addresses[cluster_serviced] >= reorder_buffers[cluster_serviced].size());
 
     //printf("Cycle %d: Partition %d Cluster %d (DELAYED) Remaining %d\n", cycle, get_id(), cluster_serviced, reorder_buffers[cluster_serviced].size());
     

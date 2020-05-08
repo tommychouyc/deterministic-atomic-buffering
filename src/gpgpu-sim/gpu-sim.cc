@@ -492,6 +492,7 @@ void shader_core_config::reg_options(class OptionParser * opp)
    option_parser_register(opp, "-buffer_stall_early", OPT_BOOL, &stall_early, "Set stall flag early (default=0)", "0");
    option_parser_register(opp, "-atomic_coalesce", OPT_BOOL, &atom_coalesce, "Actually coalesce atomics (default=0)", "0");
    option_parser_register(opp, "-less_messages", OPT_BOOL, &less_messages, "Send less flush messages (default=0)", "0");
+   option_parser_register(opp, "-overlap_flushes", OPT_BOOL, &overlap_flushes, "Allow flushes to overlap (default=0)", "0");
 }
 
 void gpgpu_sim_config::reg_options(option_parser_t opp)
@@ -1283,6 +1284,7 @@ void gpgpu_sim::gpu_print_stat()
 
    for (int i = 0; i < 48; i++)
    {
+      m_memory_sub_partition[i]->print_addr_queue_stats();
       m_memory_sub_partition[i]->print_reorder_stats(); 
    }
 
@@ -1994,12 +1996,14 @@ void gpgpu_sim::cycle()
             buffer_stalled = true;
          }
 
-         if (buffer_stalled && m_extended_buffer_flush_reqs)
+         if (buffer_stalled && m_extended_buffer_flush_reqs && flush_state == 0)
          {
             waiting_for_acks++;
          }
 
-         if (buffer_stalled && m_extended_buffer_flush_reqs == 0) { // Preparing the flush
+         bool can_flush = buffer_stalled && (m_shader_config->overlap_flushes || (m_extended_buffer_flush_reqs == 0));
+
+         if (can_flush) { // Preparing the flush
             //printf("Cycle: %u, Changed to Flushing state\n", gpu_sim_cycle);
             //flush_state = 1; // Next state = Flushing State
             flushing_counter_for_stall = 0;
