@@ -343,9 +343,12 @@ enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, 
 
 enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, unsigned &idx, bool &wb, evicted_block_info &evicted, mem_fetch* mf )
 {
-    m_access++;
+    if (mf->get_type() != PLACEHOLDER)
+    {
+        m_access++;
+        shader_cache_access_log(m_core_id, m_type_id, 0); // log accesses to cache
+    }
     is_used = true;
-    shader_cache_access_log(m_core_id, m_type_id, 0); // log accesses to cache
     enum cache_request_status status = probe(addr,idx,mf);
     switch (status) {
     case HIT_RESERVED: 
@@ -354,8 +357,11 @@ enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, 
         m_lines[idx]->set_last_access_time(time, mf->get_access_sector_mask());
         break;
     case MISS:
-        m_miss++;
-        shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
+        if (mf->get_type() != PLACEHOLDER)
+        {
+            m_miss++;
+            shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
+        }
         if ( m_config.m_alloc_policy == ON_MISS ) {
             if( m_lines[idx]->is_modified_line()) {
                 wb = true;
@@ -366,15 +372,21 @@ enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, 
         break;
     case SECTOR_MISS:
     	assert(m_config.m_cache_type == SECTOR);
-    	m_sector_miss++;
-		shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
+        if (mf->get_type() != PLACEHOLDER)
+        {
+    	    m_sector_miss++;
+		    shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
+        }
 		if ( m_config.m_alloc_policy == ON_MISS ) {
 			((sector_cache_block*)m_lines[idx])->allocate_sector( time, mf->get_access_sector_mask() );
 		}
 		break;
     case RESERVATION_FAIL:
-        m_res_fail++;
-        shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
+        if (mf->get_type() != PLACEHOLDER)
+        {
+            m_res_fail++;
+            shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
+        }
         break;
     default:
         fprintf( stderr, "tag_array::access - Error: Unknown"
@@ -1157,7 +1169,11 @@ cache_request_status data_cache::wr_hit_wb(new_addr_type addr, unsigned cache_in
 	new_addr_type block_addr = m_config.block_addr(addr);
 	m_tag_array->access(block_addr,time,cache_index,mf); // update LRU state
 	cache_block_t* block = m_tag_array->get_block(cache_index);
-	block->set_status(MODIFIED, mf->get_access_sector_mask());
+
+    if (mf->get_type() != PLACEHOLDER)
+    {
+	    block->set_status(MODIFIED, mf->get_access_sector_mask());
+    }
 
 	return HIT;
 }
@@ -1429,8 +1445,17 @@ data_cache::wr_miss_wa_lazy_fetch_on_read( new_addr_type addr,
 		cache_request_status m_status =  m_tag_array->access(block_addr,time,cache_index,wb,evicted,mf);
 		assert(m_status != HIT);
 		cache_block_t* block = m_tag_array->get_block(cache_index);
-		block->set_status(MODIFIED, mf->get_access_sector_mask());
-		if(m_status == HIT_RESERVED) {
+        if (mf->get_type() != PLACEHOLDER)
+        {
+		    block->set_status(MODIFIED, mf->get_access_sector_mask());
+        }
+        else
+        {
+            // set it to valid for now so it does not write back when evicted
+		    block->set_status(VALID, mf->get_access_sector_mask());
+        }
+		
+        if(m_status == HIT_RESERVED) {
 			block->set_ignore_on_fill(true, mf->get_access_sector_mask());
 			block->set_modified_on_fill(true, mf->get_access_sector_mask());
 		}
@@ -1649,10 +1674,14 @@ data_cache::access( new_addr_type addr,
         = m_tag_array->probe( block_addr, cache_index, mf, true);
     enum cache_request_status access_status
         = process_tag_probe( wr, probe_status, addr, cache_index, mf, time, events );
-    m_stats.inc_stats(mf->get_access_type(),
-        m_stats.select_stats_status(probe_status, access_status));
-    m_stats.inc_stats_pw(mf->get_access_type(),
-        m_stats.select_stats_status(probe_status, access_status));
+    
+    if (mf->get_type() != PLACEHOLDER)
+    {
+        m_stats.inc_stats(mf->get_access_type(),
+            m_stats.select_stats_status(probe_status, access_status));
+        m_stats.inc_stats_pw(mf->get_access_type(),
+            m_stats.select_stats_status(probe_status, access_status));
+    }
     return access_status;
 }
 

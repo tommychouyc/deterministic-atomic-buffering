@@ -568,6 +568,9 @@ private:
 public:
    // for buffer stall flush
    int flush_state; // 0 = idle/checking, 1 = flushing
+   unsigned flush_states[40];
+   std::vector<std::vector<dim3>> flush_lists;
+
    std::vector <dim3> blocked_buffers;
    std::vector <dim3> flush_list;
 
@@ -576,7 +579,13 @@ public:
    // unsigned entries_per_buffer[80][4][2];
    std::vector<std::vector<unsigned>> entries_per_buffer;
 
+   std::vector<std::bitset<48>> flush_messages_pushed;
    std::vector<std::bitset<40>> flush_message_pushed;
+
+   std::vector<unsigned int> max_req_buff_tracker;
+   std::vector<unsigned long long> req_occ_tracker;
+   std::vector<unsigned int> max_addr_buff_tracker;
+   std::vector<unsigned long long> addr_occ_tracker;
 
    int flushing_counter_for_stall;
    int cluster_to_flush_for_stall;
@@ -645,6 +654,8 @@ public:
      m_functional_sim = false;
      m_functional_sim_kernel = NULL;
    }
+
+   void log_buffer_occ_stats(bool log);
 };
 
 

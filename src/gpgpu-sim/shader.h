@@ -106,14 +106,17 @@ public:
             warp_tracker.push_back(-1);
         }
         warp_execed = 0;
+        full_cycle = 0;
+        flush_cycle = 0;
     }
     std::vector<new_addr_type> address_list;
     //std::vector<unsigned int*> buffer;
     std::vector<float> buffer;
     std::vector<bool> flushed;
     unsigned int warp_execed;
+    unsigned int full_cycle;
+    unsigned int flush_cycle;
     std::vector<int> warp_tracker; // for schduler level buffers: tracks the last warp in that shader that uses a buffer entry so it doesnt exit and not process the flush ack
-    std::vector<mem_fetch*> mem_fetches;
 };
 
 class shd_warp_t {
@@ -659,7 +662,7 @@ public:
     static const unsigned extended_buffer_buff_size = 8; // how long the buffer is
 
     bool get_extended_buffer_full_stall() { return m_extended_buffer_full_stall; }
-    void set_extended_buffer_full_stall() { m_extended_buffer_full_stall = true; }
+    void set_extended_buffer_full_stall() { m_extended_buffer_full_stall = true; m_extended_buffer->full_cycle = gpu_sim_cycle;}
 
     mem_access_t extended_buffer_generate_mem_access_for_entry( int entry_idx ) {
         mem_access_type access_type = GLOBAL_ACC_R;
@@ -675,8 +678,8 @@ public:
         unsigned int data_size = 4;
         for( unsigned i=0; i < data_size; i++ ) {
             //assert(!info.bytes.test(idx+i));
-            //info.bytes.set(idx+i);
-            info.bytes.set(i);
+            info.bytes.set(idx+i);
+            //info.bytes.set(i);
         }
         mem_access_t buffer_mem_access = mem_access_t(access_type,addr,size,is_write,info.active,info.bytes,info.chunks);
         return buffer_mem_access;
@@ -684,20 +687,10 @@ public:
 
     mem_access_t extended_buffer_generate_mem_access_for_entry_from_info(new_addr_type & addr, const warp_inst_t::transaction_info& info) {
         mem_access_type access_type = GLOBAL_ACC_R;
-        //new_addr_type addr = m_extended_buffer->address_list[0];
+        
         unsigned int size = 32; // in our case equals segment_size
         bool is_write = false;
-        unsigned chunk = (addr&127)/32; // which 32-byte chunk within in a 128-byte chunk does this thread access?
-        unsigned thread = 1;
-        //info.chunks.set(chunk);
-        //info.active.set(thread);
-        //unsigned idx = (addr&127);
-        //unsigned int data_size = 4;
-        //for( unsigned i=0; i < data_size; i++ ) {
-        //    //assert(!info.bytes.test(idx+i));
-        //    //info.bytes.set(idx+i);
-        //    info.bytes.set(i);
-        //}
+    
         mem_access_t buffer_mem_access = mem_access_t(access_type,addr,size,is_write,info.active,info.bytes,info.chunks);
         return buffer_mem_access;
     }
@@ -784,6 +777,8 @@ public:
         m_extended_buffer_full_stall = false;
         m_extended_buffer_in_use = false;
         m_extended_buffer->warp_execed = 0;
+        m_extended_buffer->full_cycle = 0;
+        m_extended_buffer->flush_cycle = 0;
         for (int i = 0; i < extended_buffer_num_entries; i++){
             m_extended_buffer->address_list[i] = 0;
             m_extended_buffer->buffer[i] = 0;
@@ -2314,6 +2309,9 @@ struct shader_core_config : public core_config
         gpgpu_cache_texl1_linesize = m_L1T_config.get_line_sz();
         gpgpu_cache_constl1_linesize = m_L1C_config.get_line_sz();
         m_valid = true;
+
+        // set seed for randomness
+        srand(gen_seed);
     }
     void reg_options(class OptionParser * opp );
     unsigned max_cta( const kernel_info_t &k ) const;
@@ -2425,6 +2423,10 @@ struct shader_core_config : public core_config
     bool atom_coalesce;
     bool less_messages;
     bool overlap_flushes;
+    bool no_sync_flush;
+    bool log_buffer_occ;
+    unsigned buffer_occ_freq;
+    unsigned gen_seed;
 };
 
 struct shader_core_stats_pod {
@@ -2703,6 +2705,10 @@ public:
 
     bool more_ctas_to_run()
     {
+        if (m_kernel == NULL)
+        {
+            return false;
+        }
         unsigned num_shaders = 80;//m_gpu->get_config().num_shader();
         unsigned tot_seeds =  num_shaders * kernel_max_cta_per_shader;
         unsigned max_cta_per_core = kernel_max_cta_per_shader;
@@ -2888,6 +2894,7 @@ public:
      int extended_buffer_flush_sch_level( unsigned sch_id );
      int extended_buffer_count_mem_sub_partition_sch_level( unsigned sch_id );
      int push_mem_sub_partition_counts(unsigned sub_partition_id, unsigned cluster, int counts, int shaders);
+     int push_mem_sub_partition_end(unsigned cluster);
      bool check_extended_buffer_stall_all_warp_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
          for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
              if (m_warp[warp_id].m_extended_buffer_in_use) {
@@ -2929,45 +2936,29 @@ public:
             {
                 return false;
             }
-             /*
-             if (true/*schedulers[sch_id]->m_extended_buffer_in_use) {
-                if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
-
-                }
-                else{ // case where warp is done but scheduler buffer not full so the stall flag isnt set
-                    bool warp_in_buffer;
-                    for(int warp_id = 0; warp_id < schedulers[sch_id]->m_supervised_warps.size(); warp_id++)
-                    {
-                        if (!schedulers[sch_id]->m_supervised_warps[warp_id]->functional_done())
-                        //if (!((schedulers[sch_id]->m_supervised_warps[warp_id]->hardware_done() && /*!m_scoreboard->pendingWrites(warp_id) &&*//* !schedulers[sch_id]->m_supervised_warps[warp_id]->done_exit()) || schedulers[sch_id]->m_supervised_warps[warp_id]->functional_done()))
-                        {
-                            return false;
-                        }
-                    }
-                    /*
-                    for(int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // checks in all buffer entries to see if any warp there is done
-                        for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
-                            /*warp_in_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
-                            if(warp_in_buffer && (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit()) || m_warp[warp_id].functional_done()){
-                                
-                            }
-                            else if(!warp_in_buffer){
-
-                            }
-                            else{
-                                return false;
-                            }
-                            if (!m_warp[warp_id].functional_done())
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                }
-             }*/
          }
          return true;
      }
+
+    bool check_extended_buffer_end_all_sch_level_buffer() 
+    {
+        for(int sch_id = 0; sch_id < schedulers.size(); sch_id++)
+        {
+            if (schedulers[sch_id]->m_extended_buffer_in_use)
+            {
+                return false;
+            }
+            
+            for (int slot = 0; slot < schedulers[sch_id]->m_supervised_warps.size(); slot++)
+            {
+                if (!schedulers[sch_id]->m_supervised_warps[slot]->functional_done())
+                {
+                    return false;
+                }
+            }
+        } 
+        return true;
+    }
 
      bool check_if_shaders_are_done_sch_level_buffer() { // checks if all warps in the sm are stalled from extended buffer
          for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
@@ -2975,44 +2966,6 @@ public:
             {
                 return false;
             }
-                /*
-             if (true/*schedulers[sch_id]->m_extended_buffer_in_use*//*) {
-                if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
-
-                }
-                else{ // case where warp is done but scheduler buffer not full so the stall flag isnt set
-                    bool warp_in_buffer;
-                    for(int warp_id = 0; warp_id < schedulers[sch_id]->m_supervised_warps.size(); warp_id++)
-                    {
-                        if (!schedulers[sch_id]->m_supervised_warps[warp_id]->functional_done())
-                        {
-                            return false;
-                        }
-                    }
-                }
-             }
-             /*if (schedulers[sch_id]->m_extended_buffer_in_use) {
-                if( schedulers[sch_id]->get_extended_buffer_full_stall() ) { // case where it is a scheduler buffer fulll and stalls
-
-                }
-                else{ // case where warp is done but scheduler buffer not full
-                    bool warp_in_buffer;
-                    for(int i = 0; i < schedulers[sch_id]->extended_buffer_num_entries; i++){ // checks in all buffer entries to see if any warp there is done
-                        for(int warp_id = 0; warp_id < MAX_WARP_PER_SHADER; warp_id++){
-                            warp_in_buffer = schedulers[sch_id]->find_warp_in_buffer(warp_id);
-                            if(warp_in_buffer && (m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id))){
-                                
-                            }
-                            else if(!warp_in_buffer){
-                                
-                            }
-                            else{
-                                return false;
-                            }
-                        }
-                    }
-                }
-             }*/
          }
          return true;
      }
@@ -3208,6 +3161,7 @@ public:
     bool check_extended_buffer_stall_warp_level_buffer();
     bool check_everything_done_except_flush_warp_level_buffer();
     bool check_extended_buffer_stall_sch_level_buffer();
+    bool check_extended_buffer_end_sch_level_buffer();
     bool check_everything_done_except_flush_sch_level_buffer();
     int extended_buffer_flush_all();
     shader_core_ctx **m_core; // easier to implement buffer

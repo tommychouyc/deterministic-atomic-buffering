@@ -352,6 +352,26 @@ memory_sub_partition::memory_sub_partition( unsigned sub_partition_id,
     atomics = 0;
     cluster_serviced = 0;
     expected_flush_messages = -1;
+
+    total_msgs = 0;
+    msg_hits = 0;
+    msg_misses = 0;
+    msg_hit_reserved = 0;
+    msg_res_fails = 0;
+
+    atomic_total = 0;
+    atomic_hit = 0;
+    atomic_miss = 0;
+    atomic_pending_hit = 0;
+    atomic_res_fail = 0;
+
+    rest_total = 0;
+    rest_hit = 0;
+    rest_miss = 0;
+    rest_pending_hit = 0;
+    rest_res_fail = 0;
+    
+    queue_addr = 0xffffffff00000000;
 }
 
 memory_sub_partition::~memory_sub_partition()
@@ -426,35 +446,147 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                 bool read_sent = was_read_sent(events);
                 MEM_SUBPART_DPRINTF("Probing L2 cache Address=%llx, status=%u\n", mf->get_addr(), status); 
 
-                if ( status == HIT ) {
-                    if( !write_sent ) {
-                        // L2 cache replies
+                if (mf->get_type() == PLACEHOLDER)
+                {
+                    // logging
+                    if(status == HIT || status == MISS || status == SECTOR_MISS || status == HIT_RESERVED)
+                    {
+                        total_msgs += 1;
+                    }
+                    if (status == HIT || status == HIT_RESERVED)
+                    {
+                        msg_hits += 1;
+                    }
+                    if(status == MISS || status == SECTOR_MISS)
+                    {
+                        msg_misses += 1;
+                    }
+                    if(status == HIT_RESERVED)
+                    {
+                        msg_hit_reserved += 1;
+                    }
+                    if(status == RESERVATION_FAIL)
+                    {
+                        msg_res_fails += 1;
+                    }
+
+                    // handling 
+                    if (status == HIT)
+                    {
+                        m_icnt_L2_queue->pop();
+                        delete mf;
+                    }
+                    else if (status != RESERVATION_FAIL)
+                    {
+                        m_icnt_L2_queue->pop();
+                        delete mf;
+                    }
+                    else
+                    {
+                        assert(!write_sent);
                         assert(!read_sent);
-                        if( mf->get_access_type() == L1_WRBK_ACC ) {
-                            m_request_tracker.erase(mf);
-                            delete mf;
-                        } else {
-                            mf->set_reply();
-                            mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
-                            m_L2_icnt_queue->push(mf);
+                    }
+                    
+                }
+                else 
+                {
+                    // logging
+                    if(status == HIT || status == MISS || status == SECTOR_MISS || status == HIT_RESERVED)
+                    {
+                        if (mf->isatomic())
+                        {
+                            atomic_total += 1;
                         }
+                        else
+                        {
+                            rest_total += 1;
+                        }
+                    }
+                    if (status == HIT || status == HIT_RESERVED)
+                    {
+                        if (mf->isatomic())
+                        {
+                            atomic_hit += 1;
+                        }
+                        else
+                        {
+                            rest_hit += 1;
+                        }
+                    }
+                    if(status == MISS || status == SECTOR_MISS)
+                    {
+                        if (mf->isatomic())
+                        {
+                            atomic_miss += 1;
+                        }
+                        else
+                        {
+                            rest_miss += 1;
+                        }
+                    }
+                    if(status == HIT_RESERVED)
+                    {
+                        if (mf->isatomic())
+                        {
+                            atomic_pending_hit += 1;
+                        }
+                        else
+                        {
+                            rest_pending_hit += 1;
+                        }
+                    }
+                    if(status == RESERVATION_FAIL)
+                    {
+                        if (mf->isatomic())
+                        {
+                            atomic_res_fail += 1;
+                        }
+                        else
+                        {
+                            rest_res_fail += 1;
+                        }
+                    }
+                    
+                    if ( status == HIT ) {
+                         if (mf->isatomic() )
+                        {
+                            mf->do_atomic();
+                        }
+                        if( !write_sent ) {
+                            // L2 cache replies
+                            assert(!read_sent);
+                            if( mf->get_access_type() == L1_WRBK_ACC ) {
+                                m_request_tracker.erase(mf);
+                                delete mf;
+                            } else {
+                                mf->set_reply();
+                                mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                                m_L2_icnt_queue->push(mf);
+                            }
+                            m_icnt_L2_queue->pop();
+                        } else {
+                            assert(write_sent);
+                            m_icnt_L2_queue->pop();
+                        }
+                    } else if ( status != RESERVATION_FAIL ) {
+                    	if(mf->is_write() && (m_config->m_L2_config.m_write_alloc_policy == FETCH_ON_WRITE || m_config->m_L2_config.m_write_alloc_policy == LAZY_FETCH_ON_READ) &&  !was_writeallocate_sent(events)) {
+                    		mf->set_reply();
+                    		mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                    		m_L2_icnt_queue->push(mf);
+                    	}
+
+                        if (mf->isatomic() )
+                        {
+                            mf->do_atomic();
+                        }
+                        
+                        // L2 cache accepted request
                         m_icnt_L2_queue->pop();
                     } else {
-                        assert(write_sent);
-                        m_icnt_L2_queue->pop();
+                        assert(!write_sent);
+                        assert(!read_sent);
+                        // L2 cache lock-up: will try again next cycle
                     }
-                } else if ( status != RESERVATION_FAIL ) {
-                	if(mf->is_write() && (m_config->m_L2_config.m_write_alloc_policy == FETCH_ON_WRITE || m_config->m_L2_config.m_write_alloc_policy == LAZY_FETCH_ON_READ) && !was_writeallocate_sent(events)) {
-                		mf->set_reply();
-                		mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
-                		m_L2_icnt_queue->push(mf);
-                	}
-                    // L2 cache accepted request
-                    m_icnt_L2_queue->pop();
-                } else {
-                    assert(!write_sent);
-                    assert(!read_sent);
-                    // L2 cache lock-up: will try again next cycle
                 }
             }
         } else {
@@ -469,8 +601,224 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
     if( !m_rop.empty() && (cycle >= m_rop.front().ready_cycle) && !m_icnt_L2_queue->full() ) {
         mem_fetch* mf = m_rop.front().req;
         m_rop.pop();
-        m_icnt_L2_queue->push(mf);
-        mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+
+        if (mf->get_inst().op == ATOMIC_OP)
+        {
+            //printf("Partition %d: ", get_id());
+            //m_req->print(stdout);
+
+            // packet arrived early before settling (still waiting on buffer count packets)
+            if (!atomics)
+            {
+                int cluster = mf->get_sid()/2;
+                reorder_buffers[cluster].push_back(mf);
+                reordered_atomics++;
+                log_reorder_stats();
+
+                if (PUSH_PLACEHOLDER)
+                {
+                    // create placeholder mf and push to L2
+                    const mem_access_t *ma = new  mem_access_t( GLOBAL_ACC_W,
+                        queue_addr,
+						32, //m_config->get_atom_sz(),
+                        true,
+                        std::bitset<32>().set(),
+                        std::bitset<128>().set(),
+		                std::bitset<4>().set(0));
+
+                    mem_fetch *n_mf = new mem_fetch( *ma,
+                        NULL,
+                        mf->get_ctrl_size(),
+                        0,
+                        0,
+                        0,
+                        m_config);
+                        n_mf->set_mf_type(PLACEHOLDER);
+                        delete ma;
+                        m_icnt_L2_queue->push(n_mf);
+                        n_mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                        queue_addr += 64;
+                }
+                return;
+            }
+            else
+            {
+                int cluster = mf->get_sid()/2;
+
+                // packet arrived "out of order"
+                if (cluster != cluster_serviced)
+                {
+                    //printf("Cycle %d: Partition %d cluster_seviced: %d, cluster: %d size: %d stashing ", gpu_sim_cycle, get_id(), cluster_serviced, cluster);
+                    //m_req->print(stdout);
+                    //printf("\n");
+                    reorder_buffers[cluster].push_back(mf);
+                    reordered_atomics++;
+                    log_reorder_stats();
+                    assert(remaining_addresses[cluster_serviced] > 0);
+
+                    if ((!PUSH_PLACEHOLDER) && reorder_buffers[cluster_serviced].size() == 0)
+                    {
+                        return;
+                    }
+                    
+                    if (PUSH_PLACEHOLDER)
+                    {
+                        // push placeholder to L2
+                        const mem_access_t *ma = new  mem_access_t( GLOBAL_ACC_W,
+                            queue_addr,
+						    32, //m_config->get_atom_sz(),
+                            true,
+                            std::bitset<32>().set(),
+                            std::bitset<128>().set(),
+		                    std::bitset<4>().set(0));
+
+                        mem_fetch *n_mf = new mem_fetch( *ma,
+                            NULL,
+                            mf->get_ctrl_size(),
+                            0,
+                            0,
+                            0,
+                            m_config);
+                    
+                        n_mf->set_mf_type(PLACEHOLDER);
+                        delete ma;
+                        m_icnt_L2_queue->push(n_mf);
+                        n_mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                        queue_addr += 64;
+                        return;
+                    }
+                    else
+                    {
+                        mf = reorder_buffers[cluster_serviced].front();
+                        reorder_buffers[cluster_serviced].erase(reorder_buffers[cluster_serviced].begin());
+                        m_icnt_L2_queue->push(mf);
+                        mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                        //printf("Cycle %d VERIF IN %d %d %d 0x%x\n", gpu_sim_cycle, m_id, mf->get_sid()/2, mf->get_sid(), mf->get_addr() );
+                        remaining_addresses[cluster_serviced]--;
+                        set_next_cluster_serviced();
+                    }
+                }
+                else if (reorder_buffers[cluster].size() > 0)
+                {
+                    assert(remaining_addresses[cluster_serviced] > 0);
+                    reordered_atomics++;
+                    reorder_buffers[cluster].push_back(mf);
+                    
+                    if (PUSH_PLACEHOLDER)
+                    {
+                        // push placeholder to L2
+                        const mem_access_t *ma = new  mem_access_t( GLOBAL_ACC_W,
+                            queue_addr,
+						    32, //m_config->get_atom_sz(),
+                            true, // Now performing a read
+                            std::bitset<32>().set(),
+                            std::bitset<128>().set(),
+		                    std::bitset<4>().set(0));
+
+                        mem_fetch *n_mf = new mem_fetch( *ma,
+                            NULL,
+                            mf->get_ctrl_size(),
+                            0,
+                            0,
+                            0,
+                            m_config);
+                        n_mf->set_mf_type(PLACEHOLDER);
+
+                        m_icnt_L2_queue->push(n_mf);
+                        n_mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                        queue_addr += 64;
+                        delete ma;
+                        return;
+                    }
+                    else
+                    {
+                        mf = reorder_buffers[cluster].front();
+                        reorder_buffers[cluster].erase(reorder_buffers[cluster].begin());
+                        m_icnt_L2_queue->push(mf);
+                        mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                        remaining_addresses[cluster_serviced]--;
+                        //printf("Cycle %d VERIF IN %d %d %d 0x%x\n", gpu_sim_cycle, m_id, mf->get_sid()/2, mf->get_sid(), mf->get_addr() );
+                        set_next_cluster_serviced();
+                    }
+                }
+                else
+                {
+                    m_icnt_L2_queue->push(mf);
+                    mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+                    remaining_addresses[cluster_serviced]--;
+                    //printf("Cycle %d VERIF IN %d %d %d 0x%x\n", gpu_sim_cycle, m_id, mf->get_sid()/2, mf->get_sid(), mf->get_addr() );
+                    set_next_cluster_serviced();
+                }
+                //printf("Cycle %d: part %d ", gpu_sim_cycle, m_id);
+                //mf->print(stdout,0);
+            }
+        }
+        else
+        {
+            m_icnt_L2_queue->push(mf);
+            mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+        }
+    }
+    // if nothing is going into the L2, push one of the reordered atomics to the L2
+    else if (!m_icnt_L2_queue->full() && atomics && remaining_addresses[cluster_serviced] > 0)
+    {
+        if (reorder_buffers[cluster_serviced].size() > 0)
+        {
+            mem_fetch* mf = reorder_buffers[cluster_serviced].front();
+            reorder_buffers[cluster_serviced].erase(reorder_buffers[cluster_serviced].begin());
+
+            m_icnt_L2_queue->push(mf);
+            mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
+            remaining_addresses[cluster_serviced]--;
+            set_next_cluster_serviced();
+                    //printf("Cycle %d VERIF IN %d %d %d 0x%x\n", gpu_sim_cycle, m_id, mf->get_sid()/2, mf->get_sid(), mf->get_addr() );
+            //printf("Cycle %d: part %d ", gpu_sim_cycle, m_id);
+            //mf->print(stdout,0);
+        }
+    }
+
+    if (!atomics)
+    {
+        bool everything_arrived = true;
+        for (int i = 0; i < 40; i++)
+        {
+            if (remaining_addr_queue[i].size() == 0 && !cluster_done[i])
+            {
+                everything_arrived = false;
+                break;
+            }
+        }
+
+        // if so, start reordering atomics again
+        if (everything_arrived)
+        {
+            // set remaining addr and first cluster
+            bool expect_nothing = true;
+            for (int i = 0; i < 40; i++)
+            {
+                assert(remaining_addr_queue[i].size() > 0 || cluster_done[i]);
+                if (remaining_addr_queue[i].size() > 0)
+                {
+                    remaining_addresses[i] = remaining_addr_queue[i].front();
+                    remaining_addr_queue[i].erase(remaining_addr_queue[i].begin());
+                }
+                else
+                {
+                    assert(cluster_done[i]);
+                    remaining_addresses[i] = 0;
+                }
+            }
+            for (int i = 0; i < 40; i++)
+            {
+                if (remaining_addresses[i] > 0)
+                {
+                    cluster_serviced = i;
+                    expect_nothing = false;
+                    break;
+                }
+            }
+            atomics = !expect_nothing;
+        }
     }
 }
 
@@ -683,52 +1031,17 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             int cluster = m_req->get_tpc();
             
             int messages_to_expect = 40;
-            /*
-            if (g_the_gpu->m_shader_config->less_messages)
+           
+            if ((unsigned) m_req->get_addr() != ((unsigned) 0xffffffff))
             {
-                messages_to_expect = m_req->get_wid();
-                assert(expected_flush_messages == -1 || messages_to_expect == m_req->get_wid());
-                expected_flush_messages = messages_to_expect;
+                remaining_addr_queue[cluster].push_back(m_req->get_addr());
             }
-
-            //printf("Cycle %d partition %d: initializing %d to %d\n", gpu_sim_cycle,get_id(), cluster,m_req->get_addr());
-            assert(!cluster_inited[cluster]);
-            remaining_addresses[cluster] = m_req->get_addr();
-            cluster_inited.set(cluster);
-            if (m_req->get_addr() > 0)
+            else
             {
-                cluster_write_req.set(cluster);
+                printf("Cycle %d Part %d received Cluster %d end\n", gpu_sim_cycle, m_id, cluster);
+                cluster_done.set(cluster);
             }
-
-            // all buffer count packets arrive, start enforcing order
-            if (cluster_inited.count() == messages_to_expect)
-            {
-                atomics = true;
-
-                for (int i = 0; i < 40; i++)
-                {
-                    if (cluster_write_req[i])
-                    {
-                        cluster_serviced = i;
-                        break;
-                    }
-                }
-                //printf("Cycle %d Partition %d init done: ", gpu_sim_cycle, get_id());
-                for (int i = 0; i < 40; i++)
-                {
-                //    printf("%i (%i) ", i, remaining_addresses[i]);
-                }
-                //printf("\n");
-
-                // no packets expected, reset fields for next flush
-                if (cluster_write_req.count() == 0)
-                {
-                    cluster_write_req.reset();
-                    cluster_inited.reset();
-                    atomics = false;
-                }
-            }*/
-            remaining_addr_queue[cluster].push_back(m_req->get_addr());
+            
             log_queue_stats();
             if (!atomics)
             {
@@ -736,7 +1049,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                 bool everything_arrived = true;
                 for (int i = 0; i < 40; i++)
                 {
-                    if (remaining_addr_queue[i].size() == 0)
+                    if (remaining_addr_queue[i].size() == 0 && !cluster_done[i])
                     {
                         everything_arrived = false;
                         break;
@@ -750,9 +1063,17 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                     bool expect_nothing = true;
                     for (int i = 0; i < 40; i++)
                     {
-                        assert(remaining_addr_queue.size() > 0);
-                        remaining_addresses[i] = remaining_addr_queue[i].front();
-                        remaining_addr_queue[i].erase(remaining_addr_queue[i].begin());
+                        assert(remaining_addr_queue[i].size() > 0 || cluster_done[i]);
+                        if (remaining_addr_queue[i].size() > 0)
+                        {
+                            remaining_addresses[i] = remaining_addr_queue[i].front();
+                            remaining_addr_queue[i].erase(remaining_addr_queue[i].begin());
+                        }
+                        else
+                        {
+                            assert(cluster_done[i]);
+                            remaining_addresses[i] = 0;
+                        }
                     }
                     for (int i = 0; i < 40; i++)
                     {
@@ -770,54 +1091,6 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             delete m_req;
             return;
         }
-
-        if (m_req->get_inst().op == ATOMIC_OP)
-        {
-            //printf("Partition %d: ", get_id());
-            //m_req->print(stdout);
-            // packet arrived early before settling (still waiting on buffer count packets)
-            if (!atomics)
-            {
-                int cluster = m_req->get_sid()/2;
-                reorder_buffers[cluster].push_back(m_req);
-                reordered_atomics++;
-                log_reorder_stats();
-                return;
-            }
-            else
-            {
-                int cluster = m_req->get_sid()/2;
-                
-                // packet arrived "out of order"
-                if (cluster != cluster_serviced)
-                {
-                    //printf("Cycle %d: Partition %d cluster_seviced: %d, cluster: %d size: %d stashing ", gpu_sim_cycle, get_id(), cluster_serviced, cluster);
-                    //m_req->print(stdout);
-                    //printf("\n");
-                    reorder_buffers[cluster].push_back(m_req);
-                    reordered_atomics++;
-                    log_reorder_stats();
-                    //return;
-                    assert(remaining_addresses[cluster_serviced] > 0);
-                    
-                    if (reorder_buffers[cluster_serviced].size() == 0)
-                    {
-                        return;
-                    }
-                    m_req = reorder_buffers[cluster_serviced].front();
-                    reorder_buffers[cluster_serviced].erase(reorder_buffers[cluster_serviced].begin());
-                }
-                else if (reorder_buffers[cluster].size() > 0)
-                {
-                    assert(remaining_addresses[cluster_serviced] > 0);
-                    reordered_atomics++;
-                    reorder_buffers[cluster].push_back(m_req);
-                    m_req = reorder_buffers[cluster].front();
-                    reorder_buffers[cluster].erase(reorder_buffers[cluster].begin());
-                }
-            }
-        }
-
     	if(m_config->m_L2_config.m_cache_type == SECTOR)
     		reqs = breakdown_request_to_sector_requests(m_req);
     	else
@@ -839,15 +1112,6 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                 
 			}
     	}
-        // mark packet as serviced
-        if (m_req->get_inst().op == ATOMIC_OP)
-        {
-            //printf("Cycle %d: Partition %d Cluster %d\n", cycle, get_id(), cluster_serviced);
-            //m_req->print(stdout);
-                    
-            remaining_addresses[cluster_serviced]--;
-            set_next_cluster_serviced();
-        }
     }
 }
 
@@ -897,7 +1161,10 @@ mem_fetch* memory_sub_partition::pop()
     mem_fetch* mf = m_L2_icnt_queue->pop();
     m_request_tracker.erase(mf);
     if ( mf && mf->isatomic() )
-        mf->do_atomic();
+    {
+        //mf->do_atomic();
+        //printf("Cycle %d VERIF OUT %d %d %d 0x%x\n", gpu_sim_cycle, m_id, mf->get_sid()/2, mf->get_sid(), mf->get_addr() );
+    }
     if( mf && (mf->get_access_type() == L2_WRBK_ACC || mf->get_access_type() == L1_WRBK_ACC) ) {
         delete mf;
         mf = NULL;

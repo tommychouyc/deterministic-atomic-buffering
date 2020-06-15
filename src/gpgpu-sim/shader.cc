@@ -49,6 +49,8 @@
 #include "../cuda-sim/ptx_ir.h"
 #include "../abstract_hardware_model.h"
 
+#include <random>
+
 #define PRIORITIZE_MSHR_OVER_WB 1
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define MIN(a,b) (((a)<(b))?(a):(b))
@@ -1122,7 +1124,6 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
     {
         if(m_icnt->full(40*new_count,true))
         { // used to be just 32, 40 is flit size
-            //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
             return -2;
         }
 
@@ -1135,15 +1136,15 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         unsigned entry_count_index = m_sid*4 + sch_id;
         g_the_gpu->entries_per_buffer[schedulers[sch_id]->m_extended_buffer->warp_execed-1][entry_count_index] += new_count;
 
-        // g_the_gpu->entries_per_buffer[m_sid][sch_id][schedulers[sch_id]->m_extended_buffer->warp_execed-1] += new_count;
-
         int slots_flushed = 0;
         for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
             int i = j;
             //int i = (j + ((get_sid()/2)%2)*32)%schedulers[sch_id]->extended_buffer_num_entries;
+
             new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
             if (addr != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
                 warpId = schedulers[sch_id]->m_extended_buffer->warp_tracker[i];
+
                 // Make the mem_access
                 const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_mem_access_for_entry(i); // TODO: FIX this function to only make the mask to 1     thread
 
@@ -1231,6 +1232,8 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
            assert(info);
 
            info->chunks.set(chunk);
+
+           // keep track of which entry corresponds to with block address
            info_map[block_address].push_back(i);
 
            unsigned idx = (addr&127);
@@ -1241,7 +1244,6 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         }
         
         if(m_icnt->full(40*total_transactions.size(),true)){ // used to be just 32, 40 is flit size
-            //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
             return -2;
         }
         printf("MAP SIZE: %d->%d\n", new_count, total_transactions.size());
@@ -1261,7 +1263,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         int slots_addressed = 0;
         for( t_list=total_transactions.begin(); t_list !=total_transactions.end(); t_list++ ) 
         {
-           // For each block addr
+           // For each block addr, generate 1 transaction
            new_addr_type addr = t_list->first;
            std::list<warp_inst_t::transaction_info>& transaction_list = t_list->second;
 
@@ -1271,7 +1273,6 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             
             warp_inst_t* inst = new warp_inst_t(m_config);
 
-            //printf("\t0x%x: ", addr);
             for (int i = 0; i < info_map[addr].size(); i++)
             {
                 int entry_id = info_map[addr][i];
@@ -1279,10 +1280,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
                 inst->add_eb_rop_callback(i, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[entry_id], schedulers[sch_id]->m_extended_buffer->address_list[entry_id]);
                 schedulers[sch_id]->m_extended_buffer->flushed[entry_id] = true;
                 slots_addressed++;
-
-                //printf("%d ", entry_id);
             }
-            //printf("\n");
             
             slots_flushed++;
             
@@ -1299,149 +1297,17 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
             inst->set_outcount(1); // hardcode
 
             active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
-            // Add callback to the inst to perform the flush atomic
-            //inst->add_eb_rop_callback(0, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i], schedulers[sch_id]->m_extended_buffer->address_list[2*i]);
-            //inst->add_eb_rop_callback(1, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i + 1], schedulers[sch_id]->m_extended_buffer->address_list[2*i + 1]);
-            //for( unsigned j=0; j < m_config->warp_size; j++ ){
-            //    if( active_mask.test(j) ){
-            //        inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
-            //        unsigned warp_id = warpId;
-            //        // unique hardware warp id across the entire GPU
-            //        unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
-//
-            //        // Add callback to the inst to perform the flush atomic
-            //        inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i], schedulers[sch_id]//->m_extended_buffer->address_list[2*i]);
-            //        //inst->add_eb_rop_callback(j+1, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i + 1], schedulers[sch_id]//->m_extended_buffer->address_list[2*i + 1]);
-            //        //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
-            //    }
-            //}
-
+            
             // Make the mem_fetch
             inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[sch_id]->get_schd_id()); // is the schd_id correct?
 		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
 		    m_icnt->push(mf);
-            //schedulers[sch_id]->m_extended_buffer->flushed[2*i] = true;
-            //schedulers[sch_id]->m_extended_buffer->flushed[2*i + 1] = true;
        }
        assert(slots_addressed == new_count);
        g_the_gpu->tot_slots_used += new_count;
        g_the_gpu->tot_transactions += total_transactions.size();
        return slots_flushed;
-
     }
-
-
-     
-
-    
-
-       // step 2: reduce each transaction size, if possible
-       /*std::map< new_addr_type, std::list<transaction_info> >::iterator t_list;
-       for( t_list=subwarp_transactions.begin(); t_list !=subwarp_transactions.end(); t_list++ ) {
-           // For each block addr
-           new_addr_type addr = t_list->first;
-           const std::list<transaction_info>& transaction_list = t_list->second;
-
-           std::list<transaction_info>::const_iterator t;
-           for(t=transaction_list.begin(); t!=transaction_list.end(); t++) {
-               // For each transaction
-               const transaction_info &info = *t;
-               memory_coalescing_arch_reduce_and_send(is_write, access_type, info, addr, segment_size);
-           }
-       }*/
-
-
-
-    
-
-    
-
-    //int slots_flushed = 16;
-    //int i = 0;
-    
-    /*
-    //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d (shader %d Sch %d) @@@@@@@@@@@\n", count, get_sid(), sch_id);
-    //schedulers[sch_id]->extended_buffer_print_contents();
-    int slots_flushed = 0;
-    for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
-        int i = j;
-        //int i = (j + ((get_sid()/2)%2)*32)%schedulers[sch_id]->extended_buffer_num_entries;
-        new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
-        if (addr != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
-            warpId = schedulers[sch_id]->m_extended_buffer->warp_tracker[i];
-            // Make the mem_access
-            const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_mem_access_for_entry(i); // TODO: FIX this function to only make the mask to 1 thread
-
-            // Make the inst for mem_fetch
-            warp_inst_t* inst = new warp_inst_t(m_config);
-            inst->set_cache_op(CACHE_GLOBAL);
-            inst->set_op(ATOMIC_OP);
-            inst->set_oprnd_type(FP_OP);
-            inst->set_space(global_space);
-            inst->set_memory_op(no_memory_op);
-            inst->set_data_size(32); // not sure if 32
-            inst->set_m_warp_id(warpId); // maybe
-            inst->set_m_scheduler_id(sch_id);
-            inst->set_out(666); //maaaaaaaaaaaybeeeeeeeeee, hard coded value
-            inst->set_outcount(1); // hardcode
-            //inst->set_in();
-            //inst->set_incount(0);
-            //m_ldst_unit->m_pending_writes[warpId][666] += 1; // what should this be? the original atomic handled this
-
-            // active mask shoud be only 1 bit since the bits of the mask determine which threads perform their callback, 
-            // so i only need 1 thread in the warp to perform 1 callback since i only have 1 buffer value
-            active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
-            for( unsigned j=0; j < m_config->warp_size; j++ ){
-                if( active_mask.test(j) ){
-                    inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
-                    unsigned warp_id = warpId;
-                    // unique hardware warp id across the entire GPU
-                    unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
-
-                    // Add callback to the inst to perform the flush atomic
-                    inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[i], addr);
-                    //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
-                }
-            }
-
-            // Make the mem_fetch
-            inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[sch_id]->get_schd_id()); // is the schd_id correct?
-		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
-		    m_icnt->push(mf);
-            //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
-
-            
-
-            /*unsigned useful_cluster = mf->get_sub_partition_id();
-            for (int cluster_id = 0; cluster_id < 40; cluster_id++) {
-                if(cluster_id == useful_cluster){
-                    m_icnt->push(mf);
-                }
-                else {
-                    const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_useless_mf(0);
-                    mem_fetch *useless_mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config);
-                    mf->set_sub_partition_id(cluster_id);
-                    m_icnt->push(useless_mf);
-                }
-            }*/
-
-            // increment some logs
-            //m_warp[warpId].inc_n_atomic(); // maybe
-            // Slot cleared in ldst writeback
-            /*
-            schedulers[sch_id]->m_extended_buffer->flushed[i] = true;
-            slots_flushed++;
-        }
-        if(slots_flushed >= max_flush){ // to support flushing in chunks
-            //printf("Flushed %d entries, %d left to flush\n", max_flush, count - max_flush);
-            break;
-        }
-    }
-
-    if(slots_flushed == 0){
-        //printf("Warp: %d, Nothing flushed\n", warpId);
-    }*/
-    //return slots_flushed;
 }
 
 int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned sch_id ) // add a check for m_extended_buffer_full_stall except for the final kernel end flush
@@ -1605,20 +1471,6 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
             inst->set_outcount(1); // hardcode
 
             active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
-            // Add callback to the inst to perform the flush atomic
-            //for( unsigned j=0; j < m_config->warp_size; j++ ){
-            //    if( active_mask.test(j) ){
-            //        inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
-            //        unsigned warp_id = warpId;
-            //        // unique hardware warp id across the entire GPU
-            //        unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
-//
-            //        // Add callback to the inst to perform the flush atomic
-            //        inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i], schedulers[sch_id]//->m_extended_buffer->address_list[2*i]);
-            //        //inst->add_eb_rop_callback(j+1, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i + 1], schedulers[sch_id]//->m_extended_buffer->address_list[2*i + 1]);
-            //        //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
-            //    }
-            //}
 
             // Make the mem_fetch
             inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[sch_id]->get_schd_id()); // is the schd_id correct?
@@ -1628,184 +1480,14 @@ int shader_core_ctx::extended_buffer_count_mem_sub_partition_sch_level( unsigned
             g_the_gpu->mem_sub_partition_counts[sub_partition_id][cluster_id]++;
             delete mf;
             delete inst;
-            //slots_flushed++;
-
        }
        return 0;
     }
-
-    
-
-    
-
-       // step 2: reduce each transaction size, if possible
-       /*std::map< new_addr_type, std::list<transaction_info> >::iterator t_list;
-       for( t_list=subwarp_transactions.begin(); t_list !=subwarp_transactions.end(); t_list++ ) {
-           // For each block addr
-           new_addr_type addr = t_list->first;
-           const std::list<transaction_info>& transaction_list = t_list->second;
-
-           std::list<transaction_info>::const_iterator t;
-           for(t=transaction_list.begin(); t!=transaction_list.end(); t++) {
-               // For each transaction
-               const transaction_info &info = *t;
-               memory_coalescing_arch_reduce_and_send(is_write, access_type, info, addr, segment_size);
-           }
-       }*/
-
-
-
-    //printf("MAP SIZE: %d\n", total_transactions.size());
-    /*
-    int slots_flushed = 16;
-    int i = 0;
-    std::map< new_addr_type, std::list<warp_inst_t::transaction_info> >::iterator t_list;
-       for( t_list=total_transactions.begin(); t_list !=total_transactions.end(); t_list++ ) {
-           // For each block addr
-           new_addr_type addr = t_list->first;
-           const std::list<warp_inst_t::transaction_info>& transaction_list = t_list->second;
-
-           const warp_inst_t::transaction_info info = transaction_list.front();
-
-           const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_mem_access_for_entry_from_info(addr, info);
-            warp_inst_t* inst = new warp_inst_t(m_config);
-            inst->set_cache_op(CACHE_GLOBAL);
-            inst->set_op(ATOMIC_OP);
-            inst->set_oprnd_type(FP_OP);
-            inst->set_space(global_space);
-            inst->set_memory_op(no_memory_op);
-            inst->set_data_size(32); // not sure if 32
-            inst->set_m_warp_id(warpId); // maybe
-            inst->set_m_scheduler_id(sch_id);
-            inst->set_out(666); //maaaaaaaaaaaybeeeeeeeeee, hard coded value
-            inst->set_outcount(1); // hardcode
-
-            active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
-            // Add callback to the inst to perform the flush atomic
-            inst->add_eb_rop_callback(0, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i], schedulers[sch_id]->m_extended_buffer->address_list[2*i]);
-            inst->add_eb_rop_callback(1, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i + 1], schedulers[sch_id]->m_extended_buffer->address_list[2*i + 1]);
-            //for( unsigned j=0; j < m_config->warp_size; j++ ){
-            //    if( active_mask.test(j) ){
-            //        inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
-            //        unsigned warp_id = warpId;
-            //        // unique hardware warp id across the entire GPU
-            //        unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
-//
-            //        // Add callback to the inst to perform the flush atomic
-            //        inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i], schedulers[sch_id]//->m_extended_buffer->address_list[2*i]);
-            //        //inst->add_eb_rop_callback(j+1, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[2*i + 1], schedulers[sch_id]//->m_extended_buffer->address_list[2*i + 1]);
-            //        //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
-            //    }
-            //}
-
-            // Make the mem_fetch
-            inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[sch_id]->get_schd_id()); // is the schd_id correct?
-		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
-            unsigned sub_partition_id = mf->get_sub_partition_id();
-            int cluster_id = m_sid / 2;
-            g_the_gpu->mem_sub_partition_counts[sub_partition_id][cluster_id]++;
-            delete mf;
-            delete inst;
-            //slots_flushed++;
-
-       }
-    /*
-    //if(m_icnt->full(40*new_count,true)){ // used to be just 32, 40 is flit size
-        //printf("Schd: %d, Interconnect full when trying to flush extended buffer, intended to push %d mf\n", sch_id, count);
-    //    return -2;
-    //}
-    //printf("@@@@@@@@@@@ In extended_buffer_flush, flush count: %d (shader %d Sch %d) @@@@@@@@@@@\n", count, get_sid(), sch_id);
-    //schedulers[sch_id]->extended_buffer_print_contents();
-    int slots_flushed = 0;
-    for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
-        int i = j;
-        //int i = (j + ((get_sid()/2)%2)*32)%schedulers[sch_id]->extended_buffer_num_entries;
-        new_addr_type addr = schedulers[sch_id]->m_extended_buffer->address_list[i];
-        if (addr != 0 && !schedulers[sch_id]->m_extended_buffer->flushed[i]){
-            warpId = schedulers[sch_id]->m_extended_buffer->warp_tracker[i];
-            // Make the mem_access
-            const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_mem_access_for_entry(i); // TODO: FIX this function to only make the mask to 1 thread
-
-            // Make the inst for mem_fetch
-            warp_inst_t* inst = new warp_inst_t(m_config);
-            inst->set_cache_op(CACHE_GLOBAL);
-            inst->set_op(ATOMIC_OP);
-            inst->set_oprnd_type(FP_OP);
-            inst->set_space(global_space);
-            inst->set_memory_op(no_memory_op);
-            inst->set_data_size(32); // not sure if 32
-            inst->set_m_warp_id(warpId); // maybe
-            inst->set_m_scheduler_id(sch_id);
-            inst->set_out(666); //maaaaaaaaaaaybeeeeeeeeee, hard coded value
-            inst->set_outcount(1); // hardcode
-            //inst->set_in();
-            //inst->set_incount(0);
-            //m_ldst_unit->m_pending_writes[warpId][666] += 1; // what should this be? the original atomic handled this
-
-            // active mask shoud be only 1 bit since the bits of the mask determine which threads perform their callback, 
-            // so i only need 1 thread in the warp to perform 1 callback since i only have 1 buffer value
-            active_mask_t active_mask = buffer_mem_access.get_warp_mask(); // Get active_mask from the already created mem_access // TODO: FIX
-            for( unsigned j=0; j < m_config->warp_size; j++ ){
-                if( active_mask.test(j) ){
-                    inst->set_addr((unsigned)j,addr); // can get address from the already created mem_access
-                    unsigned warp_id = warpId;
-                    // unique hardware warp id across the entire GPU
-                    unsigned unique_hw_wid = warp_id + m_sid * m_config->n_thread_per_shader / m_config->warp_size;
-
-                    // Add callback to the inst to perform the flush atomic
-                    inst->add_eb_rop_callback(j, buffer_flush_atomic_callback, inst, NULL, true, schedulers[sch_id]->m_extended_buffer->buffer[i], addr);
-                    //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
-                }
-            }
-
-            // Make the mem_fetch
-            inst->issue(active_mask,warpId,(gpu_sim_cycle+gpu_tot_sim_cycle), m_dynamic_warp_id, schedulers[sch_id]->get_schd_id()); // is the schd_id correct?
-		    mem_fetch *mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config); //??
-		    //m_icnt->push(mf);
-            unsigned sub_partition_id = mf->get_sub_partition_id();
-            int cluster_id = m_sid % 40;
-            g_the_gpu->mem_sub_partition_counts[sub_partition_id][cluster_id]++;
-            delete mf;
-
-
-            //printf("Schd: %d, Flush %d: addr: %u, val: %f\n",sch_id ,i , addr, schedulers[sch_id]->extended_buffer_get_value(addr));
-
-            
-
-            /*unsigned useful_cluster = mf->get_sub_partition_id();
-            for (int cluster_id = 0; cluster_id < 40; cluster_id++) {
-                if(cluster_id == useful_cluster){
-                    m_icnt->push(mf);
-                }
-                else {
-                    const mem_access_t &buffer_mem_access = schedulers[sch_id]->extended_buffer_generate_useless_mf(0);
-                    mem_fetch *useless_mf = new mem_fetch(buffer_mem_access, inst, WRITE_PACKET_SIZE, warpId, m_sid, m_tpc, m_memory_config);
-                    mf->set_sub_partition_id(cluster_id);
-                    m_icnt->push(useless_mf);
-                }
-            }*/
-
-            // increment some logs
-            //m_warp[warpId].inc_n_atomic(); // maybe
-            // Slot cleared in ldst writeback
-            //schedulers[sch_id]->m_extended_buffer->flushed[i] = true;
-            /*slots_flushed++;
-        }
-        if(slots_flushed >= max_flush){ // to support flushing in chunks
-            //printf("Flushed %d entries, %d left to flush\n", max_flush, count - max_flush);
-            break;
-        }
-    }*/
-
-    //if(slots_flushed == 0){
-        //printf("Warp: %d, Nothing flushed\n", warpId);
-    //}
-    //return slots_flushed;
 }
 
 int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, unsigned cluster, int counts, int shaders) {
     if(m_icnt->full(40,true)){ 
-        //assert(0);
+        // assert(0);
         //printf("Sub partition: %d, Interconnect full when trying to push sub parttion counts\n", sub_partition_id);
         return -2;
     }
@@ -1826,6 +1508,36 @@ int shader_core_ctx::push_mem_sub_partition_counts(unsigned sub_partition_id, un
     mf->set_sub_partition_id(sub_partition_id);
     mf->set_mf_type(BUFFER_COUNTS);
     m_icnt->push(mf);
+    return 1;
+}
+
+int shader_core_ctx::push_mem_sub_partition_end(unsigned cluster) {
+    if(m_icnt->full(48*40,true)){ 
+        // assert(0);
+        //printf("Sub partition: %d, Interconnect full when trying to push sub parttion counts\n", sub_partition_id);
+        //assert(0);
+        return -2;
+    }
+
+    for (int i = 0; i < 48; i++)
+    {
+        const mem_access_t &counts_mem_access = schedulers[0]->extended_buffer_generate_useless_mem_access(0xffffffff);
+        warp_inst_t* inst = new warp_inst_t(m_config);
+        inst->set_cache_op(CACHE_GLOBAL);
+        inst->set_op(BUFFER_COUNT);
+        inst->set_oprnd_type(FP_OP);
+        inst->set_space(global_space);
+        inst->set_memory_op(no_memory_op);
+        inst->set_data_size(32); // not sure if 32
+        inst->set_m_warp_id(0); // maybe
+        inst->set_m_scheduler_id(0);
+        inst->set_m_empty(false);
+
+        mem_fetch *mf = new mem_fetch(counts_mem_access, inst, WRITE_PACKET_SIZE, 0, 0, cluster, m_memory_config); //??
+        mf->set_sub_partition_id(i);
+        mf->set_mf_type(BUFFER_COUNTS);
+        m_icnt->push(mf);
+    }
     return 1;
 }
 
@@ -2074,7 +1786,7 @@ bool shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
             return false; // not enough space
         }
         schedulers[sch_id]->m_extended_buffer->warp_execed =  schedulers[sch_id]->m_supervised_warps[warp_id/4]->m_warps_exec;
-        // printf("Cycle %u Shader %d CTA %d scheduler %d warp %d issued\n", gpu_sim_cycle, get_sid(), m_warp[warp_id].m_dynamic_cta_id, sch_id, warp_id);
+        //printf("Cycle %u Shader %d CTA %d scheduler %d warp %d issued\n", gpu_sim_cycle, get_sid(), m_warp[warp_id].m_dynamic_cta_id, sch_id, warp_id);
         //printf("%d Shader %d Warp %d atomic issued\n", gpu_sim_cycle, get_sid(), warp_id);
         //printf("locations different: %d, buffer locations remaining: %d, enough space, issue\n", diff_addrs.size(), schedulers[sch_id]->extended_buffer_locations_remaining());
         //printf("####################### END ISSUE_WARP #######################\n\n");
@@ -3197,14 +2909,7 @@ bool gtar_scheduler::check_buffer_stall()
             if (m_supervised_warps[warp_id]->m_warps_exec == warp_exec_check)
             {
                 return false;
-            } 
-            //int wid = m_supervised_warps[warp_id]->get_warp_id();
-            //const warp_inst_t *pI = warp(wid).ibuffer_next_inst();
-
-            //if (pI == NULL || !pI->really_is_atomic)
-            //{
-            //    return false;
-            //  }
+            }
         }
     }
     
@@ -3506,6 +3211,7 @@ void gwat_scheduler::order_warps()
             }
             m_prev[i] = m_supervised_warps[i]->m_dynamic_cta_id;
             m_supervised_warps[i]->m_warps_exec++;
+            //m_supervised_warps[i]->m_warps_exec = 1;
         }
     }
 
@@ -4767,6 +4473,7 @@ void ldst_unit::writeback()
         if( m_operand_collector->writeback(m_next_wb) ) {
             bool insn_completed = false; 
             if( m_next_wb.op == ATOMIC_OP ){
+                assert(g_the_gpu->m_extended_buffer_flush_reqs > 0);
                 if(g_the_gpu->m_extended_buffer_flush_reqs > 0){
                     --g_the_gpu->m_extended_buffer_flush_reqs;
                     insn_completed = true;
@@ -6435,7 +6142,9 @@ void simt_core_cluster::core_cycle()
         m_core[*it]->cycle();
     }
 
-    if (m_config->simt_core_sim_order == 1) {
+    bool norm = (m_config->gen_seed == 0) || (rand()%2 == 0);
+
+    if ((m_config->simt_core_sim_order == 1) && norm) {
         m_core_sim_order.splice(m_core_sim_order.end(), m_core_sim_order, m_core_sim_order.begin()); 
     }
 }
@@ -6523,6 +6232,18 @@ bool simt_core_cluster::check_extended_buffer_stall_sch_level_buffer()
     for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
         is_stalled = m_core[i]->check_extended_buffer_stall_all_sch_level_buffer();
         if(is_stalled == false){
+            return false;
+        }
+    }
+    return true;
+}
+
+bool simt_core_cluster::check_extended_buffer_end_sch_level_buffer()
+{
+    bool ended;
+    for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) {
+        ended = m_core[i]->check_extended_buffer_end_all_sch_level_buffer();
+        if(ended == false){
             return false;
         }
     }
