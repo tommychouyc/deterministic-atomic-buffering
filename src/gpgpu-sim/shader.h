@@ -2940,6 +2940,19 @@ public:
          return true;
      }
 
+
+    bool check_buffers_in_use()
+    {
+        for(int sch_id = 0; sch_id < schedulers.size(); sch_id++){
+            
+            if (schedulers[sch_id]->m_extended_buffer_in_use)
+            {
+                return true;
+            }
+         }
+         return false;
+    }
+
     bool check_extended_buffer_end_all_sch_level_buffer() 
     {
         for(int sch_id = 0; sch_id < schedulers.size(); sch_id++)
@@ -3163,6 +3176,7 @@ public:
     bool check_extended_buffer_stall_sch_level_buffer();
     bool check_extended_buffer_end_sch_level_buffer();
     bool check_everything_done_except_flush_sch_level_buffer();
+    bool check_buffers_in_use();
     int extended_buffer_flush_all();
     shader_core_ctx **m_core; // easier to implement buffer
     const shader_core_config *m_config; // easier to implement buffer

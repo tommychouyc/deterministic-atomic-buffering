@@ -637,7 +637,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                         delete ma;
                         m_icnt_L2_queue->push(n_mf);
                         n_mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
-                        queue_addr += 64;
+                        queue_addr += PLACEHOLDER_SIZE;
                 }
                 return;
             }
@@ -684,7 +684,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                         delete ma;
                         m_icnt_L2_queue->push(n_mf);
                         n_mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
-                        queue_addr += 64;
+                        queue_addr += PLACEHOLDER_SIZE;
                         return;
                     }
                     else
@@ -726,7 +726,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
 
                         m_icnt_L2_queue->push(n_mf);
                         n_mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
-                        queue_addr += 64;
+                        queue_addr += PLACEHOLDER_SIZE;
                         delete ma;
                         return;
                     }
@@ -782,7 +782,8 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
         bool everything_arrived = true;
         for (int i = 0; i < 40; i++)
         {
-            if (remaining_addr_queue[i].size() == 0 && !cluster_done[i])
+            //if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]) || (remaining_addr_queue[i].front() > 0 && (remaining_addr_queue[i].front() > reorder_buffers[i].size())))
+            if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]))
             {
                 everything_arrived = false;
                 break;
@@ -1049,7 +1050,8 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                 bool everything_arrived = true;
                 for (int i = 0; i < 40; i++)
                 {
-                    if (remaining_addr_queue[i].size() == 0 && !cluster_done[i])
+                    //if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]) || (remaining_addr_queue[i].front() > 0 && (remaining_addr_queue[i].front() > reorder_buffers[i].size())))
+                    if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]))
                     {
                         everything_arrived = false;
                         break;

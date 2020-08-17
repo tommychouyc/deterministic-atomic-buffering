@@ -974,9 +974,15 @@ bool gpgpu_sim::really_active()
        return false;
     if (m_config.gpu_deadlock_detect && gpu_deadlock) 
        return false;
-    for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) 
+    for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++)
+    { 
        if( m_cluster[i]->get_not_completed()>0 ) 
-           return true;;
+           return true;
+       if (m_cluster[i]->check_buffers_in_use())
+       {
+          return true;
+       }
+    }
     for (unsigned i=0;i<m_memory_config->m_n_mem;i++) 
        if( m_memory_partition_unit[i]->busy()>0 )
            return true;;
@@ -1876,142 +1882,6 @@ void gpgpu_sim::cycle()
    }
 
    if (clock_mask & CORE) {
-      // L1 cache + shader core pipeline stages
-      m_power_stats->pwr_mem_stat->core_cache_stats[CURRENT_STAT_IDX].clear();
-      for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
-         if (m_cluster[i]->get_not_completed() || get_more_cta_left() || m_extended_buffer_flush_reqs) {
-               m_cluster[i]->core_cycle();
-               *active_sms+=m_cluster[i]->get_n_active_sms();
-         }
-         // Update core icnt/cache stats for GPUWattch
-         m_cluster[i]->get_icnt_stats(m_power_stats->pwr_mem_stat->n_simt_to_mem[CURRENT_STAT_IDX][i], m_power_stats->pwr_mem_stat->n_mem_to_simt[CURRENT_STAT_IDX][i]);
-         m_cluster[i]->get_cache_stats(m_power_stats->pwr_mem_stat->core_cache_stats[CURRENT_STAT_IDX]);
-         m_cluster[i]->get_current_occupancy(gpu_occupancy.aggregate_warp_slot_filled, gpu_occupancy.aggregate_theoretical_warp_slots);
-
-      }
-      float temp=0;
-      for (unsigned i=0;i<m_shader_config->num_shader();i++){
-        temp+=m_shader_stats->m_pipeline_duty_cycle[i];
-      }
-      temp=temp/m_shader_config->num_shader();
-      *average_pipeline_duty_cycle=((*average_pipeline_duty_cycle)+temp);
-        //cout<<"Average pipeline duty cycle: "<<*average_pipeline_duty_cycle<<endl;
-
-
-      if( g_single_step && ((gpu_sim_cycle+gpu_tot_sim_cycle) >= g_single_step) ) {
-          raise(SIGTRAP); // Debug breakpoint
-      }
-	 gpu_sim_cycle++;
-	
-      if( g_interactive_debugger_enabled ) 
-         gpgpu_debug();
-
-      // McPAT main cycle (interface with McPAT)
-#ifdef GPGPUSIM_POWER_MODEL
-      if(m_config.g_power_simulation_enabled){
-          mcpat_cycle(m_config, getShaderCoreConfig(), m_gpgpusim_wrapper, m_power_stats, m_config.gpu_stat_sample_freq, gpu_tot_sim_cycle, gpu_sim_cycle, gpu_tot_sim_insn, gpu_sim_insn);
-      }
-#endif
-
-      issue_block2core();
-      
-      // Depending on configuration, invalidate the caches once all of threads are completed.
-      int all_threads_complete = 1;
-      if (m_config.gpgpu_flush_l1_cache) {
-         for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
-            if (m_cluster[i]->get_not_completed() == 0)
-                m_cluster[i]->cache_invalidate();
-            else
-               all_threads_complete = 0 ;
-         }
-      }
-
-      if(m_config.gpgpu_flush_l2_cache){
-          if(!m_config.gpgpu_flush_l1_cache){
-              for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
-                  if (m_cluster[i]->get_not_completed() != 0){
-                      all_threads_complete = 0 ;
-                      break;
-                  }
-              }
-          }
-
-         if (all_threads_complete && !m_memory_config->m_L2_config.disabled() ) {
-            printf("Flushed L2 caches...\n");
-            if (m_memory_config->m_L2_config.get_num_lines()) {
-               int dlc = 0;
-               for (unsigned i=0;i<m_memory_config->m_n_mem;i++) {
-                  dlc = m_memory_sub_partition[i]->flushL2();
-                  assert (dlc == 0); // TODO: need to model actual writes to DRAM here
-                  printf("Dirty lines flushed from L2 %d is %d\n", i, dlc  );
-               }
-            }
-         }
-      }
-
-      if (!(gpu_sim_cycle % m_config.gpu_stat_sample_freq)) {
-         time_t days, hrs, minutes, sec;
-         time_t curr_time;
-         time(&curr_time);
-         unsigned long long  elapsed_time = MAX(curr_time - g_simulation_starttime, 1);
-         if ( (elapsed_time - last_liveness_message_time) >= m_config.liveness_message_freq && DTRACE(LIVENESS) ) {
-            days    = elapsed_time/(3600*24);
-            hrs     = elapsed_time/3600 - 24*days;
-            minutes = elapsed_time/60 - 60*(hrs + 24*days);
-            sec = elapsed_time - 60*(minutes + 60*(hrs + 24*days));
-            
-            unsigned long long active = 0, total = 0;
-            for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
-                m_cluster[i]->get_current_occupancy(active, total);
-            }
-            DPRINTF(LIVENESS, "uArch: inst.: %lld (ipc=%4.1f, occ=%0.4f\% [%llu / %llu]) sim_rate=%u (inst/sec) elapsed = %u:%u:%02u:%02u / %s", 
-                   gpu_tot_sim_insn + gpu_sim_insn, 
-                   (double)gpu_sim_insn/(double)gpu_sim_cycle,
-                   float(active)/float(total) * 100, active, total,
-                   (unsigned)((gpu_tot_sim_insn+gpu_sim_insn) / elapsed_time),
-                   (unsigned)days,(unsigned)hrs,(unsigned)minutes,(unsigned)sec,
-                   ctime(&curr_time));
-            fflush(stdout);
-            last_liveness_message_time = elapsed_time; 
-         }
-         visualizer_printstat();
-         m_memory_stats->memlatstat_lat_pw();
-         if (m_config.gpgpu_runtime_stat && (m_config.gpu_runtime_stat_flag != 0) ) {
-            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_BW_STAT) {
-               for (unsigned i=0;i<m_memory_config->m_n_mem;i++) 
-                  m_memory_partition_unit[i]->print_stat(stdout);
-               printf("maxmrqlatency = %d \n", m_memory_stats->max_mrq_latency);
-               printf("maxmflatency = %d \n", m_memory_stats->max_mf_latency);
-            }
-            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_SHD_INFO) 
-               shader_print_runtime_stat( stdout );
-            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_L1MISS) 
-               shader_print_l1_miss_stat( stdout );
-            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_SCHED) 
-               shader_print_scheduler_stat( stdout, false );
-         }
-      }
-
-      if (!(gpu_sim_cycle % 50000)) {
-         // deadlock detection 
-         if (m_config.gpu_deadlock_detect)
-         {
-            if ((gpu_sim_insn == last_gpu_sim_insn && !flush_state) || (flush_state && flush_state_count == last_flush_state_count && last_buffer_flush_count == buffer_flush_count))
-            {
-               gpu_deadlock = true;
-            }
-            else
-            {
-               last_gpu_sim_insn = gpu_sim_insn;
-               last_flush_state_count = flush_state_count;
-               last_buffer_flush_count = buffer_flush_count;
-            }
-         }
-      }
-      try_snap_shot(gpu_sim_cycle);
-      spill_log_to_file (stdout, 0, gpu_sim_cycle);
-
-      
       //////////////////////// Flushing State Machine ////////////////////////
       bool buffer_stalled;
       int num_flushed_from_stall = 0;
@@ -2111,7 +1981,7 @@ void gpgpu_sim::cycle()
                      }
                   }
                   // send end message
-                  else if (m_cluster[i]->check_extended_buffer_end_sch_level_buffer() && (!m_cluster[i]->m_core[0]->more_ctas_to_run() && !m_cluster[i]->m_core[1]->more_ctas_to_run()))
+                  /*else if (m_cluster[i]->check_extended_buffer_end_sch_level_buffer() && (!m_cluster[i]->m_core[0]->more_ctas_to_run() && !m_cluster[i]->m_core[1]->more_ctas_to_run()))
                   {
                      // send done message
                      if (m_cluster[i]->m_core[0]->push_mem_sub_partition_end(i) == 1)
@@ -2119,7 +1989,7 @@ void gpgpu_sim::cycle()
                         printf("Cycle: %d, Cluster %d end\n", gpu_sim_cycle, i);
                         flush_states[i] = 3; // end
                      }
-                  }
+                  }*/
                }
             }
             else if (flush_states[i] == 1)
@@ -2365,9 +2235,9 @@ void gpgpu_sim::cycle()
 
             for (int i = 0; i < flush_list.size(); i++)
             {
-               cluster_to_flush_for_stall = flush_list[flushing_counter_for_stall].x;
-               core_to_flush_for_stall = flush_list[flushing_counter_for_stall].y;
-               sch_to_flush_for_stall = flush_list[flushing_counter_for_stall].z;
+               cluster_to_flush_for_stall = flush_list[0].x;
+               core_to_flush_for_stall = flush_list[0].y;
+               sch_to_flush_for_stall = flush_list[0].z;
 
                // only flush one buffer per cluster per cycle
                if (!cluster_flushed_this_cycle[cluster_to_flush_for_stall])
@@ -2412,6 +2282,542 @@ void gpgpu_sim::cycle()
             }   
          }
       }
+      // L1 cache + shader core pipeline stages
+      m_power_stats->pwr_mem_stat->core_cache_stats[CURRENT_STAT_IDX].clear();
+      for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
+         if (m_cluster[i]->get_not_completed() || get_more_cta_left() || m_extended_buffer_flush_reqs) {
+               m_cluster[i]->core_cycle();
+               *active_sms+=m_cluster[i]->get_n_active_sms();
+         }
+         // Update core icnt/cache stats for GPUWattch
+         m_cluster[i]->get_icnt_stats(m_power_stats->pwr_mem_stat->n_simt_to_mem[CURRENT_STAT_IDX][i], m_power_stats->pwr_mem_stat->n_mem_to_simt[CURRENT_STAT_IDX][i]);
+         m_cluster[i]->get_cache_stats(m_power_stats->pwr_mem_stat->core_cache_stats[CURRENT_STAT_IDX]);
+         m_cluster[i]->get_current_occupancy(gpu_occupancy.aggregate_warp_slot_filled, gpu_occupancy.aggregate_theoretical_warp_slots);
+
+      }
+      float temp=0;
+      for (unsigned i=0;i<m_shader_config->num_shader();i++){
+        temp+=m_shader_stats->m_pipeline_duty_cycle[i];
+      }
+      temp=temp/m_shader_config->num_shader();
+      *average_pipeline_duty_cycle=((*average_pipeline_duty_cycle)+temp);
+        //cout<<"Average pipeline duty cycle: "<<*average_pipeline_duty_cycle<<endl;
+
+
+      if( g_single_step && ((gpu_sim_cycle+gpu_tot_sim_cycle) >= g_single_step) ) {
+          raise(SIGTRAP); // Debug breakpoint
+      }
+	 gpu_sim_cycle++;
+	
+      if( g_interactive_debugger_enabled ) 
+         gpgpu_debug();
+
+      // McPAT main cycle (interface with McPAT)
+#ifdef GPGPUSIM_POWER_MODEL
+      if(m_config.g_power_simulation_enabled){
+          mcpat_cycle(m_config, getShaderCoreConfig(), m_gpgpusim_wrapper, m_power_stats, m_config.gpu_stat_sample_freq, gpu_tot_sim_cycle, gpu_sim_cycle, gpu_tot_sim_insn, gpu_sim_insn);
+      }
+#endif
+
+      issue_block2core();
+      
+      // Depending on configuration, invalidate the caches once all of threads are completed.
+      int all_threads_complete = 1;
+      if (m_config.gpgpu_flush_l1_cache) {
+         for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
+            if (m_cluster[i]->get_not_completed() == 0)
+                m_cluster[i]->cache_invalidate();
+            else
+               all_threads_complete = 0 ;
+         }
+      }
+
+      if(m_config.gpgpu_flush_l2_cache){
+          if(!m_config.gpgpu_flush_l1_cache){
+              for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
+                  if (m_cluster[i]->get_not_completed() != 0){
+                      all_threads_complete = 0 ;
+                      break;
+                  }
+              }
+          }
+
+         if (all_threads_complete && !m_memory_config->m_L2_config.disabled() ) {
+            printf("Flushed L2 caches...\n");
+            if (m_memory_config->m_L2_config.get_num_lines()) {
+               int dlc = 0;
+               for (unsigned i=0;i<m_memory_config->m_n_mem;i++) {
+                  dlc = m_memory_sub_partition[i]->flushL2();
+                  assert (dlc == 0); // TODO: need to model actual writes to DRAM here
+                  printf("Dirty lines flushed from L2 %d is %d\n", i, dlc  );
+               }
+            }
+         }
+      }
+
+      if (!(gpu_sim_cycle % m_config.gpu_stat_sample_freq)) {
+         time_t days, hrs, minutes, sec;
+         time_t curr_time;
+         time(&curr_time);
+         unsigned long long  elapsed_time = MAX(curr_time - g_simulation_starttime, 1);
+         if ( (elapsed_time - last_liveness_message_time) >= m_config.liveness_message_freq && DTRACE(LIVENESS) ) {
+            days    = elapsed_time/(3600*24);
+            hrs     = elapsed_time/3600 - 24*days;
+            minutes = elapsed_time/60 - 60*(hrs + 24*days);
+            sec = elapsed_time - 60*(minutes + 60*(hrs + 24*days));
+            
+            unsigned long long active = 0, total = 0;
+            for (unsigned i=0;i<m_shader_config->n_simt_clusters;i++) {
+                m_cluster[i]->get_current_occupancy(active, total);
+            }
+            DPRINTF(LIVENESS, "uArch: inst.: %lld (ipc=%4.1f, occ=%0.4f\% [%llu / %llu]) sim_rate=%u (inst/sec) elapsed = %u:%u:%02u:%02u / %s", 
+                   gpu_tot_sim_insn + gpu_sim_insn, 
+                   (double)gpu_sim_insn/(double)gpu_sim_cycle,
+                   float(active)/float(total) * 100, active, total,
+                   (unsigned)((gpu_tot_sim_insn+gpu_sim_insn) / elapsed_time),
+                   (unsigned)days,(unsigned)hrs,(unsigned)minutes,(unsigned)sec,
+                   ctime(&curr_time));
+            fflush(stdout);
+            last_liveness_message_time = elapsed_time; 
+         }
+         visualizer_printstat();
+         m_memory_stats->memlatstat_lat_pw();
+         if (m_config.gpgpu_runtime_stat && (m_config.gpu_runtime_stat_flag != 0) ) {
+            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_BW_STAT) {
+               for (unsigned i=0;i<m_memory_config->m_n_mem;i++) 
+                  m_memory_partition_unit[i]->print_stat(stdout);
+               printf("maxmrqlatency = %d \n", m_memory_stats->max_mrq_latency);
+               printf("maxmflatency = %d \n", m_memory_stats->max_mf_latency);
+            }
+            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_SHD_INFO) 
+               shader_print_runtime_stat( stdout );
+            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_L1MISS) 
+               shader_print_l1_miss_stat( stdout );
+            if (m_config.gpu_runtime_stat_flag & GPU_RSTAT_SCHED) 
+               shader_print_scheduler_stat( stdout, false );
+         }
+      }
+
+      if (!(gpu_sim_cycle % 50000)) {
+         // deadlock detection 
+         if (m_config.gpu_deadlock_detect)
+         {
+            if ((gpu_sim_insn == last_gpu_sim_insn && !flush_state) || (flush_state && flush_state_count == last_flush_state_count && last_buffer_flush_count == buffer_flush_count))
+            {
+               gpu_deadlock = true;
+            }
+            else
+            {
+               last_gpu_sim_insn = gpu_sim_insn;
+               last_flush_state_count = flush_state_count;
+               last_buffer_flush_count = buffer_flush_count;
+            }
+         }
+      }
+      try_snap_shot(gpu_sim_cycle);
+      spill_log_to_file (stdout, 0, gpu_sim_cycle);
+
+            
+      /*//////////////////////// Flushing State Machine ////////////////////////
+      bool buffer_stalled;
+      int num_flushed_from_stall = 0;
+      int flushed_from_stall = 0;
+      int rounds_needed = num_buffer_entries / flush_chunk_size; // set chunk size here
+
+      std::bitset<40> flushing_clusters;
+      flushing_clusters.reset();
+
+      if (m_shader_config->no_sync_flush)
+      {
+         // check every cluster separately and flush separately
+         // keep 40 separate state machines
+         for (int i = 0; i < 40; i++)
+         {
+            if (flush_states[i] == 0)
+            {
+               if(m_cluster[i]->check_extended_buffer_stall_sch_level_buffer())
+               {
+                  unsigned int min_tier = 0xffffffff;
+                  for (unsigned j = 0; j < 2; j++) 
+                  {
+                     for (unsigned k = 0; k < 4; k++) 
+                     { 
+                        if ((m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1))
+                        {
+                           if (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed < min_tier)
+                           {
+                              min_tier = m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed;
+                           }
+                        }
+                     }
+                  }
+                  unsigned buffers_not_in_use = 0;
+                  for (unsigned j = 0; j < 2; j++) 
+                  {
+                     for (unsigned k = 0; k < 4; k++) 
+                     {
+                        bool same_tier = (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed == min_tier);
+
+                        if(m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 0)
+                        {
+                           buffers_not_in_use++;
+                        }
+                        else if (same_tier && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall == 1) && (m_cluster[i]->m_core[j]->schedulers[k] ->m_extended_buffer_in_use == 1)) 
+                        {
+                           dim3 buffer_ids;
+                           buffer_ids.x = i; // cluster
+                           buffer_ids.y = j; // shader
+                           buffer_ids.z = k; // schd id
+                           flush_lists[i].push_back(buffer_ids);
+                        }
+                        else if (same_tier && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall != 1) && (m_cluster[i]->m_core[j]->schedulers[k] ->m_extended_buffer_in_use == 1))
+                        {
+                           dim3 buffer_ids;
+                           buffer_ids.x = i; // cluster
+                           buffer_ids.y = j; // shader
+                           buffer_ids.z = k; // schd id
+                           flush_lists[i].push_back(buffer_ids);
+                           m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall = 1;
+                        }
+                     }
+                  }
+
+                  if (flush_lists[i].size() > 0)
+                  {
+                     flush_states[i] = 1; // Next state = Flushing State
+                     flush_state_count++;
+                     printf("Cycle: %u, Cluster %d changed to Flushing, %d Buffers not in use\n", gpu_sim_cycle, i, buffers_not_in_use);
+
+                     for (int j = 0; j < flush_lists[i].size(); j++)
+                     {
+                        unsigned core_to_flush_for_stall = flush_lists[i][j].y;
+                        unsigned sch_to_flush_for_stall = flush_lists[i][j].z;
+
+                        m_cluster[i]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall]->m_extended_buffer->flush_cycle = gpu_sim_cycle;
+                        m_cluster[i]->m_core[core_to_flush_for_stall]->extended_buffer_count_mem_sub_partition_sch_level(sch_to_flush_for_stall);
+                     }
+
+                     flush_messages_pushed[i].reset();
+
+                     // keep track of all flush messages actually pushed
+                     for (int j = 0; j < 48; j++)
+                     {
+                        if (m_cluster[i]->m_core[0]->push_mem_sub_partition_counts(j, i, mem_sub_partition_counts[j][i], 40) > 0)
+                        {
+                           printf("Sub partition %d Cluster %d Counts: %d\n", j, i, mem_sub_partition_counts[j][i]);
+                           mem_sub_partition_counts[j][i] = 0; // clear after pushing counts
+                           flush_messages_pushed[i].set(j);
+                        }
+                     }
+
+                     // resend missing flush messages next cycle
+                     if (flush_messages_pushed[i].count() < 48)
+                     {
+                        flush_states[i] = 2;
+                     }
+                  }
+                  // send end message
+                  /*else if (m_cluster[i]->check_extended_buffer_end_sch_level_buffer() && (!m_cluster[i]->m_core[0]->more_ctas_to_run() && !m_cluster[i]->m_core[1]->more_ctas_to_run()))
+                  {
+                     // send done message
+                     if (m_cluster[i]->m_core[0]->push_mem_sub_partition_end(i) == 1)
+                     {
+                        printf("Cycle: %d, Cluster %d end\n", gpu_sim_cycle, i);
+                        flush_states[i] = 3; // end
+                     }
+                  }*//*
+               }
+            }
+            else if (flush_states[i] == 1)
+            {
+               for (int j = 0; j < flush_lists[i].size(); j++)
+               {
+                  cluster_to_flush_for_stall = i;
+                  core_to_flush_for_stall = flush_lists[i][j].y;
+                  sch_to_flush_for_stall = flush_lists[i][j].z;
+
+                  flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_sch_level(sch_to_flush_for_stall);
+                  if (flushed_from_stall > 0)
+                  {
+                     unsigned int blocked_cycle =  m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall]  ->m_extended_buffer->full_cycle;
+                     unsigned int flush_cycle =  m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall] ->m_extended_buffer->flush_cycle;
+
+                     printf("Cycle: %d, Flushing Buffer (%d, %d, %d) Chunk %d, (%d, %d) ", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall,    sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall, m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers [sch_to_flush_for_stall]->m_extended_buffer->warp_execed);
+                     m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall]->extended_buffer_clear_all();
+
+                     if (blocked_cycle)
+                     {
+                        printf("(Blocked at %d, %d cycles ago)\n", blocked_cycle, flush_cycle - blocked_cycle);
+                     }
+                     else
+                     {
+                        printf("(Not blocked)\n");
+                     }
+
+                     m_extended_buffer_flush_reqs += flushed_from_stall;
+                     flush_lists[i].erase(flush_lists[i].begin() + j);
+                     j--;
+
+                     // flush only one buffer at a time
+                     break;
+                  }
+                  else if (flushed_from_stall == -2)
+                  {
+                     interconnect_full_cycles++;
+                     tot_interconnect_full_cycles++;
+                  }
+               }
+               if (flush_lists[i].size() == 0) 
+               { // Flushed everything
+                  printf("Finished pushing all buffers\n");
+                  flush_lists[i].clear();
+                  flush_states[i] = 0;
+               }
+            }
+            else if (flush_states[i] == 2)
+            {
+               // push remaining flush messages
+               for (int j = 0; j < 48; j++)
+               {
+                  if (!flush_messages_pushed[i][j])
+                  {
+                     if (m_cluster[i]->m_core[0]->push_mem_sub_partition_counts(j, i, mem_sub_partition_counts[j][i], 40) > 0)
+                     {
+                        printf("Sub partition %d Cluster %d Counts: %d\n", j, i, mem_sub_partition_counts[j][i]);
+                        mem_sub_partition_counts[j][i] = 0; // clear after pushing counts
+                        flush_messages_pushed[i].set(j);
+                     }
+                  }
+               }
+               if (flush_messages_pushed[i].count() == 48)
+               {
+                  flush_states[i] = 1;
+               }
+            }
+         }
+      }
+
+      // synced flushes
+      else
+      {
+         if (flush_state == 0) 
+         { // Idle / Checking state
+            for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
+               if(m_cluster[i]->check_extended_buffer_stall_sch_level_buffer()) {
+               
+               }
+               else {
+                  buffer_stalled = false;
+                  break;
+               }
+               buffer_stalled = true;
+            }
+
+            if (buffer_stalled && m_extended_buffer_flush_reqs && flush_state == 0)
+            {
+               waiting_for_acks++;
+            }
+
+            bool can_flush = buffer_stalled && (m_shader_config->overlap_flushes || (m_extended_buffer_flush_reqs == 0));
+
+            if (can_flush) { // Preparing the flush
+               //printf("Cycle: %u, Changed to Flushing state\n", gpu_sim_cycle);
+               //flush_state = 1; // Next state = Flushing State
+               flushing_counter_for_stall = 0;
+               cluster_to_flush_for_stall = 0;
+               core_to_flush_for_stall = 0;
+               sch_to_flush_for_stall = 0;
+               chunk_to_flush_for_stall = 0;
+               unsigned int min_tier = 0xffffffff;
+               for (unsigned j = 0; j < 2; j++) { // shader loop
+                  for (unsigned k = 0; k < 4; k++) { // scheduler loop
+                     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
+                        if ((m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1))
+                        {
+                           if (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed < min_tier)
+                           {
+                              min_tier = m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed;
+                           }
+                        }
+                     }
+                  }
+               }
+
+               // Mark all buffers to be stalled to block new data from entering
+               int buffers_not_in_use = 0;
+               int ready_buffers = 0;
+               for (unsigned j = 0; j < 2; j++) { // shader loop
+                  for (unsigned k = 0; k < 4; k++) { // scheduler loop
+                     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) { // cluster loop
+                        bool same_tier = (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer->warp_execed == min_tier);
+                        //same_tier = true;
+                        if(m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 0){
+                           buffers_not_in_use++;
+                        }
+                        else if (same_tier && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall == 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)) {
+                           ready_buffers++;
+                           dim3 buffer_ids;
+                           buffer_ids.x = i; // cluster
+                           buffer_ids.y = j; // shader
+                           buffer_ids.z = k; // schd id
+                           flush_list.push_back(buffer_ids);
+                        }
+                        else if (same_tier && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall != 1) && (m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use == 1)){
+                           dim3 buffer_ids;
+                           buffer_ids.x = i; // cluster
+                           buffer_ids.y = j; // shader
+                           buffer_ids.z = k; // schd id
+                           flush_list.push_back(buffer_ids);
+                           m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall = 1;
+                        }
+                        //m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_full_stall = 1;
+                        //m_cluster[i]->m_core[j]->schedulers[k]->m_extended_buffer_in_use = 1;
+                     }
+                  }
+               }
+               if (flush_list.size() > 0) { // if theres something to be flushed
+                  flush_state = 1; // Next state = Flushing State
+                  flush_state_count++;
+                  printf("Cycle: %u, Changed to Flushing, Blocked %d non full buffers, %d Buffers not in use, %d Buffers had stall flag set\n", gpu_sim_cycle, blocked_buffers.size(), buffers_not_in_use, ready_buffers);
+                  //printf("Flush list:\n");
+                  for (int buffer = 0; buffer < flush_list.size(); buffer++) {
+                     //printf("%d: (%d, %d, %d)\n", buffer, flush_list[buffer].x, flush_list[buffer].y, flush_list[buffer].z);
+                  }
+
+                  // Count how many pushes each memory paritition requires
+                  for (int buffer = 0; buffer < flush_list.size(); buffer++) {
+                     cluster_to_flush_for_stall = flush_list[buffer].x;
+                     core_to_flush_for_stall = flush_list[buffer].y;
+                     sch_to_flush_for_stall = flush_list[buffer].z;
+                     flushing_clusters.set(cluster_to_flush_for_stall);                  
+                     m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall]->m_extended_buffer->flush_cycle = gpu_sim_cycle;
+                     m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_count_mem_sub_partition_sch_level(sch_to_flush_for_stall);
+                  }
+                  for (int i = 0; i < 48; i++)
+                  {
+                     flush_message_pushed[i].reset();
+                  }
+                  for (int i = 0; i < 48; i++){ // print counts and send counts
+                     for (int j = 0; j < 40; j++){
+                        if (!m_shader_config->less_messages || flushing_clusters[j])
+                        {
+                           if (m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j], flushing_clusters.count()) > 0)
+                           {
+                              printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
+                              mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
+                              flush_message_pushed[i].set(j);
+                           }
+                        }
+                     }
+                  }
+
+                  // if any cluster failed to push all flush messages, try again next cycle
+                  for (int i = 0; i < 48; i++)
+                  {
+                     if (flush_message_pushed[i].count() < 40)
+                     {
+                        flush_state = 2;
+                        break;
+                     }
+                  }
+               }
+               else {
+                  flush_state = 0;
+               }
+            }
+            else {
+               flush_state = 0; // keep checking
+            }
+         }
+         else if (flush_state == 2)
+         {
+            for (int i = 0; i < 48; i++)
+            { // print counts and send counts
+               for (int j = 0; j < 40; j++){
+                  // if cluster did not push following flush message
+                  if (!flush_message_pushed[i][j])
+                  {
+                     if (!m_shader_config->less_messages || flushing_clusters[j])
+                     {
+                        if (m_cluster[j]->m_core[0]->push_mem_sub_partition_counts(i, j, mem_sub_partition_counts[i][j], flushing_clusters.count()) > 0)
+                        {
+                           printf("Sub partition %d Cluster %d Counts: %d\n", i, j, mem_sub_partition_counts[i][j]);
+                           mem_sub_partition_counts[i][j] = 0; // clear after pushing counts
+                           flush_message_pushed[i].set(j);
+                        }
+                     }
+                  }
+               }
+            }
+
+            bool flushed_all = true;
+            for (int i = 0; i < 48; i++)
+            {
+               if (flush_message_pushed[i].count() < 40)
+               {
+                  flushed_all = false;
+                  break;
+               }
+            }
+
+            flush_state = flushed_all ? 1 : 2;
+         }
+         else if (flush_state == 1) { // Flushing State
+            buffer_flush_cycles++;
+            tot_buffer_flush_cycles++;
+
+            std::bitset<40> cluster_flushed_this_cycle;
+            cluster_flushed_this_cycle.reset();
+
+            for (int i = 0; i < flush_list.size(); i++)
+            {
+               cluster_to_flush_for_stall = flush_list[0].x;
+               core_to_flush_for_stall = flush_list[0].y;
+               sch_to_flush_for_stall = flush_list[0].z;
+
+               // only flush one buffer per cluster per cycle
+               if (!cluster_flushed_this_cycle[cluster_to_flush_for_stall])
+               {
+                  flushed_from_stall = m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->extended_buffer_flush_sch_level(sch_to_flush_for_stall);
+                  if (flushed_from_stall > 0)
+                  {
+                     unsigned int blocked_cycle =  m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall]  ->m_extended_buffer->full_cycle;
+                     unsigned int flush_cycle =  m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall] ->m_extended_buffer->flush_cycle;
+
+                     printf("Cycle: %d, Flushing Buffer (%d, %d, %d) Chunk %d, (%d, %d) ", gpu_sim_cycle, cluster_to_flush_for_stall, core_to_flush_for_stall,    sch_to_flush_for_stall, chunk_to_flush_for_stall, flushed_from_stall, m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers [sch_to_flush_for_stall]->m_extended_buffer->warp_execed);
+                     m_cluster[cluster_to_flush_for_stall]->m_core[core_to_flush_for_stall]->schedulers[sch_to_flush_for_stall]->extended_buffer_clear_all();
+
+                     if (blocked_cycle)
+                     {
+                        printf("(Blocked at %d, %d cycles ago)\n", blocked_cycle, flush_cycle - blocked_cycle);
+                     }
+                     else
+                     {
+                        printf("(Not blocked)\n");
+                     }
+                     cluster_flushed_this_cycle.set(cluster_to_flush_for_stall);
+                     m_extended_buffer_flush_reqs += flushed_from_stall;
+                     flush_list.erase(flush_list.begin() + i);
+                     i--;
+                  }
+                  else if (flushed_from_stall == -2)
+                  {
+                     interconnect_full_cycles++;
+                     tot_interconnect_full_cycles++;
+                  }
+               }
+
+            }
+
+            if (flush_list.size() == 0) { // Flushed everything
+               printf("Finished pushing all buffers\n");
+               flush_list.clear();
+               flushing_counter_for_stall = 0;
+               chunk_to_flush_for_stall = 0;
+               flush_state = 0;
+            }   
+         }
+      }*/
 
       if (m_shader_config->log_buffer_occ)
       {

@@ -1126,7 +1126,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         { // used to be just 32, 40 is flit size
             return -2;
         }
-
+        /*
         if (g_the_gpu->entries_per_buffer.size() < schedulers[sch_id]->m_extended_buffer->warp_execed)
         {
             std::vector<unsigned> new_vec(320, 0);
@@ -1134,7 +1134,7 @@ int shader_core_ctx::extended_buffer_flush_sch_level( unsigned sch_id ) // add a
         }
 
         unsigned entry_count_index = m_sid*4 + sch_id;
-        g_the_gpu->entries_per_buffer[schedulers[sch_id]->m_extended_buffer->warp_execed-1][entry_count_index] += new_count;
+        g_the_gpu->entries_per_buffer[schedulers[sch_id]->m_extended_buffer->warp_execed-1][entry_count_index] += new_count;*/
 
         int slots_flushed = 0;
         for( int j = 0; j < schedulers[sch_id]->extended_buffer_num_entries; j++){ // only generate mf for the entries that are in use, aka addr != 0
@@ -6236,6 +6236,19 @@ bool simt_core_cluster::check_extended_buffer_stall_sch_level_buffer()
         }
     }
     return true;
+}
+
+bool simt_core_cluster::check_buffers_in_use()
+{
+    // check if any buffer is in use
+    for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++)
+    {
+       if (m_core[i]->check_buffers_in_use())
+       {
+           return true;
+       }
+    }
+    return false;
 }
 
 bool simt_core_cluster::check_extended_buffer_end_sch_level_buffer()

@@ -35,6 +35,7 @@
 #include <queue>
 
 #define PUSH_PLACEHOLDER 0
+#define PLACEHOLDER_SIZE 64
 
 class mem_fetch;
 
@@ -333,7 +334,8 @@ public:
         bool everything_arrived = true;
         for (int i = 0; i < 40; i++)
         {
-            if (remaining_addr_queue[i].size() == 0 && !cluster_done[i])
+            //if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]) || (remaining_addr_queue[i].front() > 0 && (remaining_addr_queue[i].front() > reorder_buffers[i].size())))
+            if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]))
             {
                 everything_arrived = false;
                 break;
