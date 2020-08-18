@@ -303,7 +303,10 @@ public:
 
    void ptx_fetch_inst( inst_t &inst ) const;
    void ptx_exec_inst( warp_inst_t &inst, unsigned lane_id );
+
+   // DAB
    void ptx_exec_inst_atomic_add_only( warp_inst_t &inst, unsigned lane_id, float extended_buffer_value, bool modify_src2 );
+   // end-DAB
 
    const ptx_version &get_ptx_version() const;
    void set_reg( const symbol *reg, const ptx_reg_t &value );

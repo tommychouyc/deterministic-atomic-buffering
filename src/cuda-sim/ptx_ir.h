@@ -1336,6 +1336,8 @@ public:
    {
       return m_return_var_sym;
    }
+
+   // DAB: need this to not be const
    ptx_instruction *get_instruction( unsigned PC ) const
    {
       unsigned index = PC - m_start_PC;
