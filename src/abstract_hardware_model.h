@@ -244,13 +244,15 @@ public:
    dim3 get_grid_dim() const { return m_grid_dim; }
    dim3 get_cta_dim() const { return m_block_dim; }
 
+   // DAB: new functions for deterministic CTA distribution
    bool deterministic_issuable_block_available(unsigned seed, unsigned tot_seeds);
    dim3 get_next_cta_id_det(unsigned seed, unsigned total_slots);
-    void set_cta_issued(dim3 cta);
-    int get_remaining_cta() const;
-    int get_next_det_cta();
-    void print_remaining_cta(int ctas_per_sch);
-    int get_next_cta_id_det_int(unsigned seed, unsigned total_slots);
+   void set_cta_issued(dim3 cta);
+   int get_remaining_cta() const;
+   int get_next_det_cta();
+   void print_remaining_cta(int ctas_per_sch);
+   int get_next_cta_id_det_int(unsigned seed, unsigned total_slots);
+   // end-DAB
 
    void increment_cta_id() 
    { 
@@ -266,9 +268,11 @@ public:
     }
    bool no_more_ctas_to_run() const 
    {
+       // DAB: check bool array to determine if there are CTAs left to run
 	    unsigned n_cta = (m_grid_dim.x)*(m_grid_dim.y)*(m_grid_dim.z);
 	    for(unsigned i = 0 ; i < n_cta ; i++){
-		    if(m_cta_issued[i] == false){
+		    if(m_cta_issued[i] == false)
+            {
 			    return false;
 		    }
 	    }
@@ -353,7 +357,10 @@ private:
    dim3 m_parent_tid;
    std::list<kernel_info_t *> m_child_kernels; //child kernel launched
    std::map< dim3, std::list<CUstream_st *>, dim3comp > m_cta_streams; //streams created in each CTA
+
+   // DAB: bool array to keep track of issued CTAs
    bool* m_cta_issued;
+   // end-DAB
 
 //Jin: kernel timing
 public:
@@ -868,6 +875,7 @@ struct dram_callback_t {
    class ptx_thread_info *thread;
 };
 
+// DAB
 struct eb_rop_callback_t {
    eb_rop_callback_t() { reset(); }
    void reset() { function=NULL; instruction=NULL; thread=NULL; addr=0; buffer_value=0xDEADBEEF;}
@@ -878,6 +886,7 @@ struct eb_rop_callback_t {
    new_addr_type addr; 
    float buffer_value; 
 };
+// end-DAB
 
 class inst_t {
 public:
@@ -1000,28 +1009,7 @@ public:
         m_is_cdp = 0;
         really_is_atomic = false;
     }
-    /*warp_inst_t( const warp_inst_t& orig ){
-        printf("copy constructor\n");
-        m_uid = orig.m_uid;
-        m_empty = orig.m_empty;
-        m_cache_hit = orig.m_cache_hit;
-        issue_cycle = orig.issue_cycle;
-        cycles = orig.cycles; // used for implementing initiation interval delay
-        m_isatomic = orig.m_isatomic;
-        m_is_printf = orig.m_is_printf;
-        m_warp_id = orig.m_warp_id;
-        m_dynamic_warp_id = orig.m_dynamic_warp_id; 
-        m_config = orig.m_config; 
-        m_warp_active_mask = orig.m_warp_active_mask; // dynamic active mask for timing model (after predication)
-        m_warp_issued_mask = orig.m_warp_issued_mask; // active mask at issue (prior to predication test) -- for instruction counting
-        m_per_scalar_thread_valid = orig.m_per_scalar_thread_valid;
-        m_per_scalar_thread = orig.m_per_scalar_thread;
-        m_mem_accesses_created = orig.m_mem_accesses_created;
-        m_accessq = orig.m_accessq;
-        sm_next_uid = orig.sm_next_uid;
-        m_scheduler_id = orig.m_scheduler_id;  //the scheduler that issues this inst
-        m_is_cdp = orig.m_is_cdp;
-    }*/
+    
     virtual ~warp_inst_t(){
     }
 
@@ -1077,6 +1065,7 @@ public:
     }
     void completed( unsigned long long cycle ) const;  // stat collection: called when the instruction is completed  
 
+    // DAB: new setters
     void set_cache_op(cache_operator_type type) { cache_op = type; }
     void set_m_empty(bool empty) { m_empty = empty; }
     void set_op(uarch_op_t type) { op = type; }
@@ -1099,6 +1088,7 @@ public:
     }
     void set_incount(int num) { incount = num; }
     void set_oprnd_type(uarch_operand_type_t type) { oprnd_type = type; }
+    // end-DAB
 
     void set_addr( unsigned n, new_addr_type addr ) 
     {
@@ -1144,7 +1134,6 @@ public:
     };
 
     void generate_mem_accesses();
-    void generate_extended_buffer_mem_accesses();
     void memory_coalescing_arch( bool is_write, mem_access_type access_type );
     void memory_coalescing_arch_atomic( bool is_write, mem_access_type access_type );
     void memory_coalescing_arch_reduce_and_send( bool is_write, mem_access_type access_type, const transaction_info &info, new_addr_type addr, unsigned segment_size );
@@ -1165,6 +1154,7 @@ public:
         m_per_scalar_thread[lane_id].callback.thread = thread;
     }
 
+    // DAB
     void add_atomic_without_callback( unsigned lane_id, 
                        void (*function)(const class inst_t*, class ptx_thread_info*),
                        const inst_t *inst, 
@@ -1200,6 +1190,7 @@ public:
         m_per_scalar_thread[lane_id].eb_rop_callback.buffer_value = buffer_value;
         m_per_scalar_thread[lane_id].eb_rop_callback.addr = addr;
     }
+    // end-DAB
 
     void set_active( const active_mask_t &active );
 
@@ -1304,9 +1295,12 @@ protected:
     //Jin: cdp support
 public:
     int m_is_cdp;
+
+    // DAB: these need to be public
     unsigned m_warp_id;
     unsigned m_scheduler_id;  //the scheduler that issues this inst
     std::vector<per_thread_info> m_per_scalar_thread;
+    // end-DAB
 };
 
 void move_warp( warp_inst_t *&dst, warp_inst_t *&src );
