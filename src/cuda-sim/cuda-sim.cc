@@ -1530,6 +1530,7 @@ int tensorcore_op(int inst_opcode){
 		return 0;
 }
 
+// DAB
 void ptx_thread_info::ptx_exec_inst_atomic_add_only( warp_inst_t &inst, unsigned lane_id, float extended_buffer_value, bool modify_src2)
 {
     
@@ -1745,6 +1746,7 @@ void ptx_thread_info::ptx_exec_inst_atomic_add_only( warp_inst_t &inst, unsigned
    }
       
 }
+// end-DAB
 
 void ptx_thread_info::ptx_exec_inst( warp_inst_t &inst, unsigned lane_id)
 {
@@ -1877,7 +1879,7 @@ void ptx_thread_info::ptx_exec_inst( warp_inst_t &inst, unsigned lane_id)
    if ( pI->get_opcode() == ATOM_OP ) {
       insn_memaddr = last_eaddr();
       insn_space = last_space();
-      inst.add_callback( lane_id, last_callback().function, last_callback().instruction, this,true /*atomic*/); // prevents going to ROP
+      inst.add_callback( lane_id, last_callback().function, last_callback().instruction, this,true /*atomic*/);
       unsigned to_type = pI->get_type();
       insn_data_size = datatype2size(to_type);
    }
@@ -1973,6 +1975,7 @@ const warp_inst_t *ptx_fetch_inst( address_type pc )
     return function_info::pc_to_instruction(pc);
 }
 
+// DAB: need seed and tot_slot for CTA designation
 unsigned ptx_sim_init_thread( kernel_info_t &kernel,
                               ptx_thread_info** thread_info,
                               int sid,
@@ -2072,6 +2075,7 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
    std::map<unsigned,memory_space*> &local_mem_lookup = local_memory_lookup[sid];
    while( kernel.more_threads_in_cta() ) {
       
+      // DAB: CTA is deterministically distributed
       dim3 ctaid3d = kernel.get_next_cta_id_det(seed, tot_slots);
 
       unsigned new_tid = kernel.get_next_thread_id();
@@ -2128,6 +2132,7 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
    }
 
    //kernel.increment_cta_id();
+   // DAB: mark CTA issued based on seed
 	kernel.set_cta_issued(kernel.get_next_cta_id_det(seed,tot_slots));
 
    assert( active_threads.size() <= threads_left );
@@ -2488,6 +2493,7 @@ void functionalCoreSim::initializeCTA(unsigned ctaid_cp)
     
     //get threads for a cta
     for(unsigned i=0; i<m_kernel->threads_per_cta();i++) {
+        // DAB: this needs to be fixed if only func. sim is used (seed and total slots hardcoded to 0 for now since only perf. sim was used for DAB)
         ptx_sim_init_thread(*m_kernel,&m_thread[i],0,i,m_kernel->threads_per_cta()-i,m_kernel->threads_per_cta(),this,0,i/m_warp_size,(gpgpu_t*)m_gpu, 0,0, true);
         assert(m_thread[i]!=NULL && !m_thread[i]->is_done());
         char fname[2048];

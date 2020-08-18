@@ -64,6 +64,8 @@ extern void   gpgpu_ptx_sim_memcpy_symbol(const char *hostVar, const void *src, 
 
 extern void read_sim_environment_variables();
 extern void ptxinfo_opencl_addinfo( std::map<std::string,function_info*> &kernels );
+
+// DAB: need seed and tot_slot for CTA designation
 unsigned ptx_sim_init_thread( kernel_info_t &kernel,
                               class ptx_thread_info** thread_info,
                               int sid,
@@ -77,6 +79,8 @@ unsigned ptx_sim_init_thread( kernel_info_t &kernel,
                               unsigned seed,
                               unsigned tot_slots,
                               bool functionalSimulationMode = false);
+// end-DAB
+
 const warp_inst_t *ptx_fetch_inst( address_type pc );
 const struct gpgpu_ptx_sim_info* ptx_sim_kernel_info(const class function_info *kernel);
 void ptx_print_insn( address_type pc, FILE *fp );
