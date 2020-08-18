@@ -343,11 +343,14 @@ enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, 
 
 enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, unsigned &idx, bool &wb, evicted_block_info &evicted, mem_fetch* mf )
 {
+    // DAB: if placeholder is pushed, do not register it as part of cache stats (only have it occupy cache-lines)
     if (mf->get_type() != PLACEHOLDER)
     {
         m_access++;
         shader_cache_access_log(m_core_id, m_type_id, 0); // log accesses to cache
     }
+    // end-DAB
+
     is_used = true;
     enum cache_request_status status = probe(addr,idx,mf);
     switch (status) {
@@ -357,11 +360,14 @@ enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, 
         m_lines[idx]->set_last_access_time(time, mf->get_access_sector_mask());
         break;
     case MISS:
+        // DAB: if placeholder is pushed, do not register it as part of cache stats (only have it occupy cache-lines)
         if (mf->get_type() != PLACEHOLDER)
         {
             m_miss++;
             shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
         }
+        //end-DAB
+
         if ( m_config.m_alloc_policy == ON_MISS ) {
             if( m_lines[idx]->is_modified_line()) {
                 wb = true;
@@ -372,21 +378,28 @@ enum cache_request_status tag_array::access( new_addr_type addr, unsigned time, 
         break;
     case SECTOR_MISS:
     	assert(m_config.m_cache_type == SECTOR);
+
+        // DAB: if placeholder is pushed, do not register it as part of cache stats (only have it occupy cache-lines)
         if (mf->get_type() != PLACEHOLDER)
         {
     	    m_sector_miss++;
 		    shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
         }
+        //end-DAB
+
 		if ( m_config.m_alloc_policy == ON_MISS ) {
 			((sector_cache_block*)m_lines[idx])->allocate_sector( time, mf->get_access_sector_mask() );
 		}
 		break;
     case RESERVATION_FAIL:
+        // DAB: if placeholder is pushed, do not register it as part of cache stats (only have it occupy cache-lines)
         if (mf->get_type() != PLACEHOLDER)
         {
             m_res_fail++;
             shader_cache_access_log(m_core_id, m_type_id, 1); // log cache misses
         }
+        // end-DAB
+        
         break;
     default:
         fprintf( stderr, "tag_array::access - Error: Unknown"
@@ -1170,10 +1183,12 @@ cache_request_status data_cache::wr_hit_wb(new_addr_type addr, unsigned cache_in
 	m_tag_array->access(block_addr,time,cache_index,mf); // update LRU state
 	cache_block_t* block = m_tag_array->get_block(cache_index);
 
+    // DAB: if placeholder is pushed, do not register it as part of cache stats (only have it occupy cache-lines)
     if (mf->get_type() != PLACEHOLDER)
     {
 	    block->set_status(MODIFIED, mf->get_access_sector_mask());
     }
+    // end-DAB
 
 	return HIT;
 }
@@ -1445,15 +1460,18 @@ data_cache::wr_miss_wa_lazy_fetch_on_read( new_addr_type addr,
 		cache_request_status m_status =  m_tag_array->access(block_addr,time,cache_index,wb,evicted,mf);
 		assert(m_status != HIT);
 		cache_block_t* block = m_tag_array->get_block(cache_index);
+        
+        // DAB: if placeholder is pushed, do not register it as part of cache stats (only have it occupy cache-lines)
         if (mf->get_type() != PLACEHOLDER)
         {
 		    block->set_status(MODIFIED, mf->get_access_sector_mask());
         }
         else
         {
-            // set it to valid for now so it does not write back when evicted
+            // set line to valid so it does not write back when evicted
 		    block->set_status(VALID, mf->get_access_sector_mask());
         }
+        // end-DAB
 		
         if(m_status == HIT_RESERVED) {
 			block->set_ignore_on_fill(true, mf->get_access_sector_mask());
@@ -1675,6 +1693,7 @@ data_cache::access( new_addr_type addr,
     enum cache_request_status access_status
         = process_tag_probe( wr, probe_status, addr, cache_index, mf, time, events );
     
+    // DAB: if placeholder is pushed, do not register it as part of cache stats (only have it occupy cache-lines)
     if (mf->get_type() != PLACEHOLDER)
     {
         m_stats.inc_stats(mf->get_access_type(),
@@ -1682,6 +1701,8 @@ data_cache::access( new_addr_type addr,
         m_stats.inc_stats_pw(mf->get_access_type(),
             m_stats.select_stats_status(probe_status, access_status));
     }
+    // end-DAB
+
     return access_status;
 }
 
