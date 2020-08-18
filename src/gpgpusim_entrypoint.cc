@@ -136,7 +136,11 @@ void *gpgpu_sim_thread_concurrent(void*)
             // no other kernel is currently running.
             
             // DAB: really_active() checks for buffer occupancy as well
-            if(g_stream_manager->operation(&sim_cycles) && !g_the_gpu->really_active())
+            // order is switched since there is a window where a new kernel can get issued even if 
+            // flushes are not completely flushed, meaning we only want to even attempt to launch a 
+            // new kernel if gpu is completely inactive. This means stream operations are completely
+            // serialized, and performance is slightly under-recorded
+            if(!g_the_gpu->really_active() && g_stream_manager->operation(&sim_cycles))
                 break;
 
             //functional simulation
