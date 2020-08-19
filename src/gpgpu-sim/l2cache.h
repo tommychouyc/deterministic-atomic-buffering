@@ -34,8 +34,10 @@
 #include <list>
 #include <queue>
 
+// DAB: should probably become a config
 #define PUSH_PLACEHOLDER 0
 #define PLACEHOLDER_SIZE 64
+// end-DAB
 
 class mem_fetch;
 
@@ -193,31 +195,42 @@ public:
         m_memcpy_cycle_offset += 1;
    }
 
-   std::bitset<40> cluster_inited;
-   std::bitset<40> cluster_write_req;
-   std::bitset<40> cluster_done;
-   std::vector<int> remaining_addresses;
-   std::vector<std::vector<mem_fetch*>> reorder_buffers;
-   bool atomics;
-   int cluster_serviced;
-   int expected_flush_messages;
+    // DAB
+    // structures for reordering mechanism
+   std::vector<bool> cluster_done;
 
+   // counters to keep track of remaining atomics per shader cluster
+   std::vector<int> remaining_addresses;
    std::vector<std::vector<unsigned>> remaining_addr_queue;
 
+   // buffers to keep track of reordered atomics
+   std::vector<std::vector<mem_fetch*>> reorder_buffers;
+
+   // whether or not to start reordering atomics
+   bool atomics;
+
+   // counter indicating which cluster gets to push their atomic
+   int cluster_serviced;
+
+   // total number of atomics that arrive out of order
+   unsigned long long reordered_atomics;
+
+   // for mode where placeholders are pushed, this keeps track of the addr the
+   // "queue" would be within the L2
    new_addr_type queue_addr;
 
+    std::vector<unsigned long long> max_length_per_addr_queue;
+    unsigned long long max_queue_length_total;
+
+   std::vector<unsigned long long> max_length_per_buffer;
+   unsigned long long max_length_total;
+
+   // counters to log cache statistics
    unsigned long total_msgs;
    unsigned long msg_res_fails;
    unsigned long msg_misses;
    unsigned long msg_hits;
    unsigned long msg_hit_reserved;
-   unsigned long long reordered_atomics;
-
-    unsigned long long max_length_per_addr_queue[40];
-    unsigned long long max_queue_length_total;
-
-   unsigned long long max_length_per_buffer[40];
-   unsigned long long max_length_total;
 
     unsigned long long atomic_total;
     unsigned long long atomic_hit;
@@ -233,159 +246,13 @@ public:
 
    //bool with_l2_write_queue;
 
-   void print_reorder_stats()
-   {
-       printf("ID: %d\n", get_id());
-       printf("Max Entries: %d\tNumber of re-orderings: %d\n",max_length_total, reordered_atomics);
-       for (int i = 0; i < 40; i++)
-       {
-           printf("%d (%d)\t", i, max_length_per_buffer[i]);
-       }
-       printf("\n\ntotal_msgs=%llu\n", total_msgs);
-       printf("msg_hits=%llu\n", msg_hits);
-       printf("msg_misses=%llu\n",msg_misses);
-       printf("msg_pending_hits=%llu\n", msg_hit_reserved);
-       printf("msg_res_fails=%llu\n",msg_res_fails);
-       
-       printf("\n\ntotal_atomics=%llu\n", atomic_total);
-       printf("atomic_hits=%llu\n", atomic_hit);
-       printf("atomic_misses=%llu\n",atomic_miss);
-       printf("atomic_pending_hits=%llu\n", atomic_pending_hit);
-       printf("atomic_res_fails=%llu\n",atomic_res_fail);
-       printf("atomic_miss_rate=%.2f\n", ((float) atomic_miss)/atomic_total);
-       
-       printf("\n\ntotal_rest=%llu\n", rest_total);
-       printf("rest_hits=%llu\n", rest_hit);
-       printf("rest_misses=%llu\n",rest_miss);
-       printf("rest_pending_hits=%llu\n", rest_pending_hit);
-       printf("rest_res_fails=%llu\n",rest_res_fail);
-       printf("rest_miss_rate=%.2f\n", ((float) rest_miss)/rest_total);
-       reordered_atomics = 0;
-       printf("\n");
-   }
+    void print_reorder_stats();
+    void log_reorder_stats();
+    void print_addr_queue_stats();
+    void log_queue_stats();
 
-    void log_reorder_stats()
-    {
-        int tot = 0;
-        for (int i = 0; i < 40; i++)
-        {
-            tot += reorder_buffers[i].size();
-
-            if (reorder_buffers[i].size() > max_length_per_buffer[i])
-            {
-                max_length_per_buffer[i] = reorder_buffers[i].size();
-            }
-        }
-
-        if (tot > max_length_total)
-        {
-            max_length_total = tot;
-        }
-    }
-
-    void print_addr_queue_stats()
-   {
-       printf("ID: %d\n", get_id());
-       printf("Max Entries: %d\n",max_queue_length_total);
-       for (int i = 0; i < 40; i++)
-       {
-           printf("%d (%d)\t", i, max_length_per_addr_queue[i]);
-       }
-       printf("\n");
-   }
-
-    void log_queue_stats()
-    {
-        int tot = 0;
-        for (int i = 0; i < 40; i++)
-        {
-            tot += remaining_addr_queue[i].size();
-
-            if (remaining_addr_queue[i].size() > max_length_per_addr_queue[i])
-            {
-                max_length_per_addr_queue[i] = remaining_addr_queue[i].size();
-            }
-        }
-        if (tot > max_queue_length_total)
-        {
-            max_queue_length_total = tot;
-        }
-    }
-
-   void set_next_cluster_serviced()
-   {
-       //printf("Partition %d ", get_id());
-       for (int i = 0; i < 40; i++)
-       {
-           // look for next cluster to be serviced
-           int tested_cluster = (cluster_serviced + i + 1)%40;
-          // printf("%i (%d) ", tested_cluster, reorder_buffers[tested_cluster].size());
-           if (remaining_addresses[tested_cluster] > 0)
-           {
-           // printf("\nCycle %d Partition %d moving %d to %d\n",0, get_id(), cluster_serviced, tested_cluster);
-               cluster_serviced = tested_cluster;
-               return;
-           }
-       }
-
-       // all clusters done, check if there is already another set of flush messages queued up
-        // check if all messages arrived for given flush
-        queue_addr = 0xffffffff00000000;
-        bool everything_arrived = true;
-        for (int i = 0; i < 40; i++)
-        {
-            //if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]) || (remaining_addr_queue[i].front() > 0 && (remaining_addr_queue[i].front() > reorder_buffers[i].size())))
-            if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]))
-            {
-                everything_arrived = false;
-                break;
-            }
-        }
-
-        // if so, start reordering atomics again
-        if (everything_arrived)
-        {
-            // set remaining addr and first cluster
-            bool expect_nothing = true;
-            for (int i = 0; i < 40; i++)
-            {
-                assert(remaining_addr_queue[i].size() > 0 || cluster_done[i]);
-                if (remaining_addr_queue[i].size() > 0)
-                {
-                    remaining_addresses[i] = remaining_addr_queue[i].front();
-                    remaining_addr_queue[i].erase(remaining_addr_queue[i].begin());
-                }
-                else
-                {
-                    assert(cluster_done[i]);
-                    remaining_addresses[i] = 0;
-                }
-            }
-            for (int i = 0; i < 40; i++)
-            {
-                if (remaining_addresses[i] > 0)
-                {
-                    cluster_serviced = i;
-                    expect_nothing = false;
-                    break;
-                }
-            }
-            atomics = !expect_nothing;
-        }
-        else
-        {
-            atomics = false;
-        }
-
-        /*
-       atomics = 0;
-       cluster_inited.reset();
-       cluster_write_req.reset();
-       expected_flush_messages = -1;*/
-       //printf("\nCycle %d Partition %d Done\n",0, get_id());
-   }
-
-    bool push_atomic(unsigned long long cycle);
+   void set_next_cluster_serviced();
+   // end-DAB
 
 private:
 // data

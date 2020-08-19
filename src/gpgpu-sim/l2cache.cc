@@ -338,20 +338,23 @@ memory_sub_partition::memory_sub_partition( unsigned sub_partition_id,
     m_L2_icnt_queue = new fifo_pipeline<mem_fetch>("L2-to-icnt",0,L2_icnt);
     wb_addr=-1;
 
-    for (int i = 0; i < 40; i++)
+    // DAB: initialize new structures
+    for (int i = 0; i < config->num_clusters; i++)
     {
         remaining_addresses.push_back(0);
-        reorder_buffers.push_back(std::vector<mem_fetch*>());
         remaining_addr_queue.push_back(std::vector<unsigned>());
-        max_length_per_buffer[i] = 0;
-        max_length_per_addr_queue[i] = 0;
+        reorder_buffers.push_back(std::vector<mem_fetch*>());
+        cluster_done.push_back(false);
+
+        max_length_per_buffer.push_back(0);
+        max_length_per_addr_queue.push_back(0);
     }
-    max_length_total = 0;
-    max_queue_length_total = 0; 
     reordered_atomics = 0;
-    atomics = 0;
+    atomics = false;
     cluster_serviced = 0;
-    expected_flush_messages = -1;
+
+    max_length_total = 0;
+    max_queue_length_total = 0;
 
     total_msgs = 0;
     msg_hits = 0;
@@ -370,8 +373,10 @@ memory_sub_partition::memory_sub_partition( unsigned sub_partition_id,
     rest_miss = 0;
     rest_pending_hit = 0;
     rest_res_fail = 0;
-    
+
+    // set to bogus address (not meant to enter DRAM)
     queue_addr = 0xffffffff00000000;
+    // end-DAB
 }
 
 memory_sub_partition::~memory_sub_partition()
@@ -446,6 +451,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                 bool read_sent = was_read_sent(events);
                 MEM_SUBPART_DPRINTF("Probing L2 cache Address=%llx, status=%u\n", mf->get_addr(), status); 
 
+                // DAB: specifically log hits/misses of placeholder messages
                 if (mf->get_type() == PLACEHOLDER)
                 {
                     // logging
@@ -488,9 +494,10 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                     }
                     
                 }
+                // end-DAB
                 else 
                 {
-                    // logging
+                    //DAB: logging; attempt to separate atomic hit rate vs other mem. hit rate (not accurate, under-reports rates)
                     if(status == HIT || status == MISS || status == SECTOR_MISS || status == HIT_RESERVED)
                     {
                         if (mf->isatomic())
@@ -546,12 +553,17 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                             rest_res_fail += 1;
                         }
                     }
+                    // end-DAB
                     
+                    // handling of transactions
                     if ( status == HIT ) {
+                        // DAB: atomic moved to here
                          if (mf->isatomic() )
                         {
                             mf->do_atomic();
                         }
+                        // end-DAB
+
                         if( !write_sent ) {
                             // L2 cache replies
                             assert(!read_sent);
@@ -575,10 +587,12 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                     		m_L2_icnt_queue->push(mf);
                     	}
 
+                        // DAB: atomic moved here
                         if (mf->isatomic() )
                         {
                             mf->do_atomic();
                         }
+                        // end-DAB
                         
                         // L2 cache accepted request
                         m_icnt_L2_queue->pop();
@@ -602,6 +616,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
         mem_fetch* mf = m_rop.front().req;
         m_rop.pop();
 
+        // DAB
         if (mf->get_inst().op == ATOMIC_OP)
         {
             //printf("Partition %d: ", get_id());
@@ -687,7 +702,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                         queue_addr += PLACEHOLDER_SIZE;
                         return;
                     }
-                    else
+                    else // the next in-order atomic is already here, push that into L2 queue
                     {
                         mf = reorder_buffers[cluster_serviced].front();
                         reorder_buffers[cluster_serviced].erase(reorder_buffers[cluster_serviced].begin());
@@ -753,12 +768,14 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                 //mf->print(stdout,0);
             }
         }
+        // end-DAB
         else
         {
             m_icnt_L2_queue->push(mf);
             mf->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
         }
     }
+    // DAB
     // if nothing is going into the L2, push one of the reordered atomics to the L2
     else if (!m_icnt_L2_queue->full() && atomics && remaining_addresses[cluster_serviced] > 0)
     {
@@ -777,10 +794,11 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
         }
     }
 
+    // at every cycle, check if preflush messages have all arrived (may be redundant since there are multiple checks for this)
     if (!atomics)
     {
         bool everything_arrived = true;
-        for (int i = 0; i < 40; i++)
+        for (int i = 0; i < m_config->num_clusters; i++)
         {
             //if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]) || (remaining_addr_queue[i].front() > 0 && (remaining_addr_queue[i].front() > reorder_buffers[i].size())))
             if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]))
@@ -795,7 +813,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
         {
             // set remaining addr and first cluster
             bool expect_nothing = true;
-            for (int i = 0; i < 40; i++)
+            for (int i = 0; i < m_config->num_clusters; i++)
             {
                 assert(remaining_addr_queue[i].size() > 0 || cluster_done[i]);
                 if (remaining_addr_queue[i].size() > 0)
@@ -809,7 +827,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
                     remaining_addresses[i] = 0;
                 }
             }
-            for (int i = 0; i < 40; i++)
+            for (int i = 0; i < m_config->num_clusters; i++)
             {
                 if (remaining_addresses[i] > 0)
                 {
@@ -821,6 +839,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
             atomics = !expect_nothing;
         }
     }
+    // end-DAB
 }
 
 bool memory_sub_partition::full() const
@@ -1028,19 +1047,18 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
     	m_stats->memlatstat_icnt2mem_pop(m_req);
     	std::vector<mem_fetch*> reqs;
 
+        // DAB: handle preflush messages
         if(m_req->get_type() == BUFFER_COUNTS){
             int cluster = m_req->get_tpc();
             
-            int messages_to_expect = 40;
-           
             if ((unsigned) m_req->get_addr() != ((unsigned) 0xffffffff))
             {
                 remaining_addr_queue[cluster].push_back(m_req->get_addr());
             }
             else
             {
-                printf("Cycle %d Part %d received Cluster %d end\n", gpu_sim_cycle, m_id, cluster);
-                cluster_done.set(cluster);
+                // printf("Cycle %d Part %d received Cluster %d end\n", gpu_sim_cycle, m_id, cluster);
+                cluster_done[cluster] = true;
             }
             
             log_queue_stats();
@@ -1048,7 +1066,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             {
                 // check if all messages arrived for given flush
                 bool everything_arrived = true;
-                for (int i = 0; i < 40; i++)
+                for (int i = 0; i < m_config->num_clusters; i++)
                 {
                     //if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]) || (remaining_addr_queue[i].front() > 0 && (remaining_addr_queue[i].front() > reorder_buffers[i].size())))
                     if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]))
@@ -1063,7 +1081,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                 {
                     // set remaining addr and first cluster
                     bool expect_nothing = true;
-                    for (int i = 0; i < 40; i++)
+                    for (int i = 0; i < m_config->num_clusters; i++)
                     {
                         assert(remaining_addr_queue[i].size() > 0 || cluster_done[i]);
                         if (remaining_addr_queue[i].size() > 0)
@@ -1077,7 +1095,7 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
                             remaining_addresses[i] = 0;
                         }
                     }
-                    for (int i = 0; i < 40; i++)
+                    for (int i = 0; i < m_config->num_clusters; i++)
                     {
                         if (remaining_addresses[i] > 0)
                         {
@@ -1093,6 +1111,8 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
             delete m_req;
             return;
         }
+        // end-DAB
+
     	if(m_config->m_L2_config.m_cache_type == SECTOR)
     		reqs = breakdown_request_to_sector_requests(m_req);
     	else
@@ -1110,63 +1130,24 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
 				r.ready_cycle = cycle + m_config->rop_latency;
 				m_rop.push(r);
 				req->set_status(IN_PARTITION_ROP_DELAY,gpu_sim_cycle+gpu_tot_sim_cycle);
-
-                
 			}
     	}
     }
-}
-
-bool memory_sub_partition::push_atomic(unsigned long long cycle)
-{
-    if (!atomics || reorder_buffers[cluster_serviced].size() == 0)// || remaining_addresses[cluster_serviced] == 0 || reorder_buffers[cluster_serviced].size() == 0)
-    {
-        return false;
-    }
-    assert(remaining_addresses[cluster_serviced] > 0);
-    // assert(remaining_addresses[cluster_serviced] >= reorder_buffers[cluster_serviced].size());
-
-    //printf("Cycle %d: Partition %d Cluster %d (DELAYED) Remaining %d\n", cycle, get_id(), cluster_serviced, reorder_buffers[cluster_serviced].size());
-    
-    mem_fetch* m_req = reorder_buffers[cluster_serviced].front();
-    //m_req->print(stdout);
-
-    reorder_buffers[cluster_serviced].erase(reorder_buffers[cluster_serviced].begin());
-    remaining_addresses[cluster_serviced]--;
-	m_stats->memlatstat_icnt2mem_pop(m_req);
-	std::vector<mem_fetch*> reqs;
-    if(m_config->m_L2_config.m_cache_type == SECTOR)
-		reqs = breakdown_request_to_sector_requests(m_req);
-	else
-		reqs.push_back(m_req);
-
-	for(unsigned i=0; i<reqs.size(); ++i) {
-		mem_fetch* req = reqs[i];
-		m_request_tracker.insert(req);
-		if( req->istexture() ) {
-			m_icnt_L2_queue->push(req);
-			req->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,gpu_sim_cycle+gpu_tot_sim_cycle);
-		} else {
-			rop_delay_t r;
-			r.req = req;
-			r.ready_cycle = cycle + m_config->rop_latency;
-			m_rop.push(r);
-			req->set_status(IN_PARTITION_ROP_DELAY,gpu_sim_cycle+gpu_tot_sim_cycle);
-		}
-	}
-    set_next_cluster_serviced();
-    return true;
 }
 
 mem_fetch* memory_sub_partition::pop() 
 {
     mem_fetch* mf = m_L2_icnt_queue->pop();
     m_request_tracker.erase(mf);
+
+    // DAB: move atomic execution to L2
     if ( mf && mf->isatomic() )
     {
         //mf->do_atomic();
         //printf("Cycle %d VERIF OUT %d %d %d 0x%x\n", gpu_sim_cycle, m_id, mf->get_sid()/2, mf->get_sid(), mf->get_addr() );
     }
+    // end-DAB
+
     if( mf && (mf->get_access_type() == L2_WRBK_ACC || mf->get_access_type() == L1_WRBK_ACC) ) {
         delete mf;
         mf = NULL;
@@ -1229,3 +1210,160 @@ void memory_sub_partition::visualizer_print( gzFile visualizer_file )
 
     clear_L2cache_stats_pw();
 }
+
+// DAB
+// new logging functions
+void memory_sub_partition::print_reorder_stats()
+{
+    printf("ID: %d\n", get_id());
+    printf("Max Entries: %d\tNumber of re-orderings: %d\n",max_length_total, reordered_atomics);
+
+    for (int i = 0; i < m_config->num_clusters; i++)
+    {
+        printf("%d (%d)\t", i, max_length_per_buffer[i]);
+    }
+    printf("\n\ntotal_msgs=%llu\n", total_msgs);
+    printf("msg_hits=%llu\n", msg_hits);
+    printf("msg_misses=%llu\n",msg_misses);
+    printf("msg_pending_hits=%llu\n", msg_hit_reserved);
+    printf("msg_res_fails=%llu\n",msg_res_fails);
+
+    printf("\n\ntotal_atomics=%llu\n", atomic_total);
+    printf("atomic_hits=%llu\n", atomic_hit);
+    printf("atomic_misses=%llu\n",atomic_miss);
+    printf("atomic_pending_hits=%llu\n", atomic_pending_hit);
+    printf("atomic_res_fails=%llu\n",atomic_res_fail);
+    printf("atomic_miss_rate=%.2f\n", ((float) atomic_miss)/atomic_total);
+
+    printf("\n\ntotal_rest=%llu\n", rest_total);
+    printf("rest_hits=%llu\n", rest_hit);
+    printf("rest_misses=%llu\n",rest_miss);
+    printf("rest_pending_hits=%llu\n", rest_pending_hit);
+    printf("rest_res_fails=%llu\n",rest_res_fail);
+    printf("rest_miss_rate=%.2f\n", ((float) rest_miss)/rest_total);
+    printf("\n");
+
+    reordered_atomics = 0;
+}
+
+void memory_sub_partition::log_reorder_stats()
+{
+    int tot = 0;
+    for (int i = 0; i < m_config->num_clusters; i++)
+    {
+        tot += reorder_buffers[i].size();
+
+        if (reorder_buffers[i].size() > max_length_per_buffer[i])
+        {
+            max_length_per_buffer[i] = reorder_buffers[i].size();
+        }
+    }
+
+    if (tot > max_length_total)
+    {
+        max_length_total = tot;
+    }
+}
+
+void memory_sub_partition::print_addr_queue_stats()
+{
+    printf("ID: %d\n", get_id());
+    printf("Max Entries: %d\n",max_queue_length_total);
+
+    for (int i = 0; i < m_config->num_clusters; i++)
+    {
+        printf("%d (%d)\t", i, max_length_per_addr_queue[i]);
+    }
+
+    printf("\n");
+}
+
+void memory_sub_partition::log_queue_stats()
+{
+    int tot = 0;
+    for (int i = 0; i < m_config->num_clusters; i++)
+    {
+        tot += remaining_addr_queue[i].size();
+
+        if (remaining_addr_queue[i].size() > max_length_per_addr_queue[i])
+        {
+            max_length_per_addr_queue[i] = remaining_addr_queue[i].size();
+        }
+    }
+    if (tot > max_queue_length_total)
+    {
+        max_queue_length_total = tot;
+    }
+}
+
+// function finds next cluster in order
+void memory_sub_partition::set_next_cluster_serviced()
+{
+    //printf("Partition %d ", get_id());
+    for (int i = 0; i < m_config->num_clusters; i++)
+    {
+        // look for next cluster to be serviced
+        int tested_cluster = (cluster_serviced + i + 1)%m_config->num_clusters;
+        // printf("%i (%d) ", tested_cluster, reorder_buffers[tested_cluster].size());
+        if (remaining_addresses[tested_cluster] > 0)
+        {
+            // printf("\nCycle %d Partition %d moving %d to %d\n",0, get_id(), cluster_serviced, tested_cluster);
+            cluster_serviced = tested_cluster;
+            return;
+        }
+    }
+
+    // all clusters done, check if there is already another set of flush messages queued up
+    // check if all messages arrived for given flush
+    queue_addr = 0xffffffff00000000;
+    bool everything_arrived = true;
+
+    for (int i = 0; i < m_config->num_clusters; i++)
+    {
+        //if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]) || (remaining_addr_queue[i].front() > 0 && (remaining_addr_queue[i].front() > reorder_buffers[i].size())))
+        if ((remaining_addr_queue[i].size() == 0 && !cluster_done[i]))
+        {
+            everything_arrived = false;
+            break;
+        }
+    }
+
+    // if so, start reordering atomics again
+    if (everything_arrived)
+    {
+        // set remaining addr and first cluster
+        bool expect_nothing = true;
+        for (int i = 0; i < m_config->num_clusters; i++)
+        {
+            assert(remaining_addr_queue[i].size() > 0 || cluster_done[i]);
+            if (remaining_addr_queue[i].size() > 0)
+            {
+                remaining_addresses[i] = remaining_addr_queue[i].front();
+                remaining_addr_queue[i].erase(remaining_addr_queue[i].begin());
+            }
+            else
+            {
+                assert(cluster_done[i]);
+                remaining_addresses[i] = 0;
+            }
+        }
+        for (int i = 0; i < m_config->num_clusters; i++)
+        {
+            if (remaining_addresses[i] > 0)
+            {
+                cluster_serviced = i;
+                expect_nothing = false;
+                break;
+            }
+        }
+
+        atomics = !expect_nothing;
+    }
+    else
+    {
+        atomics = false;
+    }
+
+    //printf("\nCycle %d Partition %d Done\n",0, get_id());
+}
+// end-DAB
