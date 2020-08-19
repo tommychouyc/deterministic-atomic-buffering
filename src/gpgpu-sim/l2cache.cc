@@ -617,7 +617,7 @@ void memory_sub_partition::cache_cycle( unsigned cycle )
         m_rop.pop();
 
         // DAB
-        if (mf->get_inst().op == ATOMIC_OP)
+        if (mf->get_inst().op == ATOMIC_OP && !g_the_gpu->m_shader_config->no_reordering)
         {
             //printf("Partition %d: ", get_id());
             //m_req->print(stdout);
@@ -1049,6 +1049,11 @@ void memory_sub_partition::push( mem_fetch* m_req, unsigned long long cycle )
 
         // DAB: handle preflush messages
         if(m_req->get_type() == BUFFER_COUNTS){
+            if (g_the_gpu->m_shader_config->no_reordering)
+            {
+                delete m_req;
+                return;
+            }
             int cluster = m_req->get_tpc();
             
             if ((unsigned) m_req->get_addr() != ((unsigned) 0xffffffff))

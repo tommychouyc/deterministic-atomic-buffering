@@ -290,6 +290,10 @@ struct memory_config {
    unsigned write_high_watermark;
    unsigned write_low_watermark;
    bool m_perf_sim_memcpy;
+
+   // DAB needs to know this
+   unsigned num_clusters;
+   // end-DAB
 };
 
 // global counters and flags (please try not to add to this list!!!)
@@ -308,6 +312,11 @@ public:
         sscanf(gpgpu_runtime_stat, "%d:%x", &gpu_stat_sample_freq, &gpu_runtime_stat_flag);
         m_shader_config.init();
         ptx_set_tex_cache_linesize(m_shader_config.m_L1T_config.get_line_sz());
+
+        // DAB: workaround, memory partitions need to know number of clusters
+        m_memory_config.num_clusters = m_shader_config.n_simt_clusters;
+        // end-DAB
+
         m_memory_config.init();
         init_clock_domains(); 
         power_config::init();
@@ -436,7 +445,11 @@ public:
    void init();
    void cycle();
    bool active();
+
+   // DAB: checks for buffer occupancy as well
    bool really_active();
+   // end-DAB
+
    bool cycle_insn_cta_max_hit() {
        return (m_config.gpu_max_cycle_opt && (gpu_tot_sim_cycle + gpu_sim_cycle) >= m_config.gpu_max_cycle_opt) ||
            (m_config.gpu_max_insn_opt && (gpu_tot_sim_insn + gpu_sim_insn) >= m_config.gpu_max_insn_opt) ||
@@ -549,11 +562,15 @@ private:
    class gpgpu_sim_wrapper *m_gpgpusim_wrapper;
    unsigned long long  last_gpu_sim_insn;
 
+   // DAB
+   // used for deadlock check to also check if it is stuck on the same 
+   // flush when instructions are not executed
    unsigned long long  last_buffer_flush_count;
    unsigned long long  buffer_flush_count;
 
    unsigned long long last_flush_state_count;
    unsigned long long flush_state_count;
+   // end-DAB
 
    unsigned long long  last_liveness_message_time; 
 
@@ -566,46 +583,34 @@ private:
 
 
 public:
-   // for buffer stall flush
+   // DAB: additional structures required
+
+   // for buffer stall flush:
    int flush_state; // 0 = idle/checking, 1 = flushing
-   unsigned flush_states[40];
-   std::vector<std::vector<dim3>> flush_lists;
+   std::vector <dim3> flush_list; // holds list of buffers to be flushed
 
-   std::vector <dim3> blocked_buffers;
-   std::vector <dim3> flush_list;
+   std::vector<unsigned> flush_states; // for non-synched flushes
+   std::vector<std::vector<dim3>> flush_lists; // for non-synched flushes
 
-   int mem_sub_partition_counts [48][40];
+   std::vector<std::vector<unsigned>> mem_sub_partition_counts; // keep track of values for buffer pre-flush messages
+   std::vector<std::vector<bool>> flush_messages_pushed; // keep track of which pre-flush messages were not pushed yet
 
-   // unsigned entries_per_buffer[80][4][2];
-   std::vector<std::vector<unsigned>> entries_per_buffer;
+   std::vector<std::vector<unsigned>> entries_per_buffer; // log number of entries per buffer
 
-   std::vector<std::bitset<48>> flush_messages_pushed;
-   std::vector<std::bitset<40>> flush_message_pushed;
-
+   // for tracking buffer occupancy over time (at memory partition level)
    std::vector<unsigned int> max_req_buff_tracker;
    std::vector<unsigned long long> req_occ_tracker;
    std::vector<unsigned int> max_addr_buff_tracker;
    std::vector<unsigned long long> addr_occ_tracker;
 
-   int flushing_counter_for_stall;
+    // could really be made a local var.
    int cluster_to_flush_for_stall;
    int core_to_flush_for_stall;
-   int warp_to_flush_for_stall;
    int sch_to_flush_for_stall;
    int chunk_to_flush_for_stall;
-   int long_flushing_counter_for_stall;
 
-   unsigned long long waiting_for_acks;
-
-   // for kernel exit flush
-   int flushing_counter; // mod this number to find cluster, core, and warp id
-   int cluster_to_flush;
-   int core_to_flush;
-   int warp_to_flush;
-   int sch_to_flush;
-   int chunk_to_flush;
-   int long_flushing_counter;
-   int m_extended_buffer_flush_reqs;
+   unsigned long long waiting_for_acks; // log number of cycles spent waiting for acks
+   int m_extended_buffer_flush_reqs; // keeps track of in-flight buffer flushes
 
    // buffer flush stats
    int interconnect_full_cycles;
@@ -616,10 +621,14 @@ public:
    unsigned long long buffer_flush_cycles;
    unsigned long long tot_buffer_flush_cycles;
    int buffer_entries_reuse; // tracks coalescing
-   
+
    // tracks real coalescing
    unsigned long long tot_transactions;
    unsigned long long tot_slots_used;
+
+   void log_buffer_occ_stats(bool log); // log snapshot of buffers at memory partition
+   void buffer_flush_cycle(); // cycle through buffer flushing FSM
+   // end-DAB
 
    unsigned long long  gpu_sim_insn;
    unsigned long long  gpu_tot_sim_insn;
@@ -627,7 +636,6 @@ public:
    unsigned gpu_sim_insn_last_update_sid;
    occupancy_stats gpu_occupancy;
    occupancy_stats gpu_tot_occupancy;
-
 
    FuncCache get_cache_config(std::string kernel_name);
    void set_cache_config(std::string kernel_name, FuncCache cacheConfig );
@@ -654,8 +662,6 @@ public:
      m_functional_sim = false;
      m_functional_sim_kernel = NULL;
    }
-
-   void log_buffer_occ_stats(bool log);
 };
 
 
