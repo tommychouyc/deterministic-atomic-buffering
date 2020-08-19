@@ -96,6 +96,7 @@ public:
    bool m_active; 
 };
 
+// DAB: new class
 class extended_buffer {
 public:
     extended_buffer(int size){
@@ -118,6 +119,7 @@ public:
     unsigned int flush_cycle;
     std::vector<int> warp_tracker; // for schduler level buffers: tracks the last warp in that shader that uses a buffer entry so it doesnt exit and not process the flush ack
 };
+// end-DAB
 
 class shd_warp_t {
 public:
@@ -292,6 +294,7 @@ public:
     unsigned get_dynamic_warp_id() const { return m_dynamic_warp_id; }
     unsigned get_warp_id() const { return m_warp_id; }
 
+    // DAB: new functions
     bool get_extended_buffer_full_stall() { return m_extended_buffer_full_stall; }
     void set_extended_buffer_full_stall() { m_extended_buffer_full_stall = true; }
 
@@ -437,7 +440,7 @@ public:
         }
         m_extended_buffer->flushed[buffer_idx] = true;
     }
-
+    // end-DAB
 private:
     static const unsigned IBUFFER_SIZE=2;
     class shader_core_ctx *m_shader;
@@ -473,28 +476,12 @@ private:
     unsigned m_inst_in_pipeline;
 
     //Jin: cdp support
-    struct halfword
-    {
-        uint32_t bot;
-        uint32_t top;
-    };
-
-    union word
-    {
-        uint64_t w;
-        halfword  hw;
-    };
-
-    union fb
-    {
-        float f;
-        unsigned int b;
-    };
 
 public:
     unsigned int m_cdp_latency;
     bool m_cdp_dummy;
 
+    // DAB: new fields
     extended_buffer *m_extended_buffer;
     bool m_extended_buffer_full_stall;
     bool m_extended_buffer_in_use;
@@ -505,6 +492,7 @@ public:
 
     unsigned m_dynamic_cta_id;
     unsigned m_warps_exec;
+    // end-DAB
 };
 
 
@@ -577,6 +565,8 @@ public:
     virtual void done_adding_supervised_warps() {
         m_last_supervised_issued = m_supervised_warps.end();
     }
+
+    // DAB: virtual functions for new schedulers
     virtual void verify_issue(const warp_inst_t *pI, unsigned wid)
     {
 
@@ -613,7 +603,7 @@ public:
 
         return true;
     }
-
+    // end-DAB
 
     // The core scheduler cycle method is meant to be common between
     // all the derived schedulers.  The scheduler's behaviour can be
@@ -661,6 +651,7 @@ public:
     unsigned extended_buffer_num_entries = num_buffer_entries; // how many addresses we can store
     static const unsigned extended_buffer_buff_size = 8; // how long the buffer is
 
+    // DAB: new functions for local buffers
     bool get_extended_buffer_full_stall() { return m_extended_buffer_full_stall; }
     void set_extended_buffer_full_stall() { m_extended_buffer_full_stall = true; m_extended_buffer->full_cycle = gpu_sim_cycle;}
 
@@ -685,6 +676,7 @@ public:
         return buffer_mem_access;
     }
 
+    // used for coalesce case
     mem_access_t extended_buffer_generate_mem_access_for_entry_from_info(new_addr_type & addr, const warp_inst_t::transaction_info& info) {
         mem_access_type access_type = GLOBAL_ACC_R;
         
@@ -817,7 +809,7 @@ public:
             assert(buffer_idx != -1);
             return;
         }
-	m_extended_buffer->buffer[buffer_idx] += input_num;
+	    m_extended_buffer->buffer[buffer_idx] += input_num;
         m_extended_buffer_in_use = true;
         m_extended_buffer->address_list[buffer_idx] = address;
         m_extended_buffer->warp_tracker[buffer_idx] = warp_id;
@@ -852,13 +844,15 @@ public:
         }
         m_extended_buffer->flushed[buffer_idx] = true;
     }
+    bool coalesce;
+    bool stall_early;
+    // end-DAB
+
     // The m_supervised_warps list is all the warps this scheduler is supposed to
     // arbitrate between.  This is useful in systems where there is more than
     // one warp scheduler. In a single scheduler system, this is simply all
     // the warps assigned to this core.
     std::vector< shd_warp_t* > m_supervised_warps;
-    bool coalesce;
-    bool stall_early;
 
 protected:
     virtual void do_on_warp_issued( unsigned warp_id,
@@ -890,6 +884,7 @@ protected:
     int m_id;
 };
 
+// DAB: new schedulers
 class srr_scheduler : public scheduler_unit {
 public:
 	srr_scheduler ( shader_core_stats* stats, shader_core_ctx* shader,
@@ -936,7 +931,7 @@ public:
     void get_next_rr_warp(
     std::vector<shd_warp_t*>::const_iterator& warp_to_check,
     std::vector<shd_warp_t*>& considered_warps,
-    std::bitset<16>        warp_mask,
+    std::bitset<16>        warp_mask, // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
     std::vector<shd_warp_t*>& next_cycle_warp 
     );
 
@@ -949,8 +944,8 @@ public:
     unsigned long long skipping_bar;
 
     std::vector<shd_warp_t*> bar_warps;
-    std::bitset<16> warps_to_consider;
-    std::bitset<16> barrier_warps;
+    std::bitset<16> warps_to_consider; // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
+    std::bitset<16> barrier_warps; // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
 
     shd_warp_t* first_bar;
 };
@@ -1146,7 +1141,7 @@ public:
         rr = false;
         kid = 0;
         considered_non_atomic = 0;
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 16; i++) // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
         {
             passed_atomic[i] = 0;
         }
@@ -1178,7 +1173,7 @@ public:
     {
         printf("\n----------------------------\n");
         printf("passed_atomic=");
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 16; i++) // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
         {
             printf("%d (%d)\t", passed_atomic[i], m_supervised_warps[i]->m_warps_exec);
         }
@@ -1218,7 +1213,7 @@ public:
 
     std::vector<shd_warp_t* > m_can_also_issue;
     unsigned long long considered_non_atomic;
-    unsigned long long passed_atomic[16];
+    unsigned long long passed_atomic[16]; // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
 
     std::vector<int> ctas;
 };
@@ -1240,7 +1235,7 @@ public:
         rr = false;
         kid = 0;
         considered_non_atomic = 0;
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 16; i++) // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
         {
             passed_atomic[i] = 0;
         }
@@ -1268,7 +1263,7 @@ public:
     {
         printf("\n----------------------------\n");
         printf("passed_atomic=");
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 16; i++) // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
         {
             printf("%d (%d)\t", passed_atomic[i], m_supervised_warps[i]->m_warps_exec);
         }
@@ -1298,11 +1293,12 @@ public:
 
     std::vector<shd_warp_t* > m_can_also_issue;
     unsigned long long considered_non_atomic;
-    unsigned long long passed_atomic[16];
+    unsigned long long passed_atomic[16]; // TODO: not hardcode to 16 (should be number of warps distributed to each scheduler)
     std::vector<unsigned long long> icounts;
 
     std::vector<int> ctas;
 };
+// end-DAB
 
 class lrr_scheduler : public scheduler_unit {
 public:
@@ -2147,9 +2143,11 @@ public:
     void get_L1C_sub_stats(struct cache_sub_stats &css) const;
     void get_L1T_sub_stats(struct cache_sub_stats &css) const;
 
+    // DAB: moved to public
     shader_core_mem_fetch_allocator* get_mf_allocator() { return m_mf_allocator; }
     mem_fetch_interface* get_icnt() { return m_icnt; }
     std::map<unsigned/*warp_id*/, std::map<unsigned/*regnum*/,unsigned/*count*/> > m_pending_writes;
+    // end-DAB
     
 protected:
     ldst_unit( mem_fetch_interface *icnt,
@@ -2415,18 +2413,19 @@ struct shader_core_config : public core_config
 
     bool adpative_volta_cache_config;
 
+    // DAB
     int gpgpu_buffer_entry_size;
-
-    // BUFFERS
     bool coalesce;
     bool stall_early;
     bool atom_coalesce;
     bool less_messages;
     bool overlap_flushes;
     bool no_sync_flush;
+    bool no_reordering;
     bool log_buffer_occ;
     unsigned buffer_occ_freq;
     unsigned gen_seed;
+    // end-DAB
 };
 
 struct shader_core_stats_pod {
@@ -2686,6 +2685,7 @@ public:
     void reinit(unsigned start_thread, unsigned end_thread, bool reset_not_completed );
     bool issue_block2core( class kernel_info_t &kernel );
 
+    // DAB: new logging functions
     void print_sch_dist_stats()
     {
         for( unsigned i=0; i < schedulers.size(); i++ ) 
@@ -2700,16 +2700,16 @@ public:
         {
             schedulers[i]->reset_counts();
         }
-        m_ctas = 0;
     }
 
+    // quick way to see if shader has anymore CTAs to run
     bool more_ctas_to_run()
     {
         if (m_kernel == NULL)
         {
             return false;
         }
-        unsigned num_shaders = 80;//m_gpu->get_config().num_shader();
+        unsigned num_shaders = m_config->n_simt_clusters*m_config->n_simt_cores_per_cluster;// m_gpu->get_config().num_shader();
         unsigned tot_seeds =  num_shaders * kernel_max_cta_per_shader;
         unsigned max_cta_per_core = kernel_max_cta_per_shader;
         
@@ -2724,6 +2724,7 @@ public:
         }
         return false;
     }
+    // end-DAB
 
     void cache_flush();
     void cache_invalidate();
@@ -2890,6 +2891,7 @@ public:
 	 void inc_simt_to_mem(unsigned n_flits){ m_stats->n_simt_to_mem[m_sid] += n_flits; }
 	 bool check_if_non_released_reduction_barrier(warp_inst_t &inst);
 
+     // DAB
      int extended_buffer_flush_warp_level( unsigned warpId );
      int extended_buffer_flush_sch_level( unsigned sch_id );
      int extended_buffer_count_mem_sub_partition_sch_level( unsigned sch_id );
@@ -2982,6 +2984,7 @@ public:
          }
          return true;
      }
+     // end-DAB
 
     std::vector<shd_warp_t>   m_warp;   // per warp information array
     const shader_core_config *m_config;
@@ -3100,12 +3103,7 @@ private:
     unsigned int m_occupied_regs;
     unsigned int m_occupied_ctas;
     std::bitset<MAX_THREAD_PER_SM> m_occupied_hwtid;
-    std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid; 
-
-    /**********************************************/
-    unsigned int m_ctas;
-    /*********************************************/
-
+    std::map<unsigned int, unsigned int> m_occupied_cta_to_hwtid;
 };
 
 class simt_core_cluster {
@@ -3127,6 +3125,7 @@ public:
     bool icnt_injection_buffer_full(unsigned size, bool write);
     void icnt_inject_request_packet(class mem_fetch *mf);
 
+    // DAB
     void print_sch_dist_stats()
     {
         for( unsigned i=0; i < m_config->n_simt_cores_per_cluster; i++ ) 
@@ -3142,6 +3141,16 @@ public:
             m_core[i]->reset_sch();
         }
     }
+    bool check_extended_buffer_stall_warp_level_buffer();
+    bool check_everything_done_except_flush_warp_level_buffer();
+    bool check_extended_buffer_stall_sch_level_buffer();
+    bool check_extended_buffer_end_sch_level_buffer();
+    bool check_everything_done_except_flush_sch_level_buffer();
+    bool check_buffers_in_use();
+    int extended_buffer_flush_all();
+    shader_core_ctx **m_core; // easier to implement buffer
+    const shader_core_config *m_config; // easier to implement buffer
+    // end-DAB
 
     // for perfect memory interface
     bool response_queue_full() {
@@ -3171,15 +3180,6 @@ public:
     void get_icnt_stats(long &n_simt_to_mem, long &n_mem_to_simt) const;
     float get_current_occupancy( unsigned long long& active, unsigned long long & total ) const;
 
-    bool check_extended_buffer_stall_warp_level_buffer();
-    bool check_everything_done_except_flush_warp_level_buffer();
-    bool check_extended_buffer_stall_sch_level_buffer();
-    bool check_extended_buffer_end_sch_level_buffer();
-    bool check_everything_done_except_flush_sch_level_buffer();
-    bool check_buffers_in_use();
-    int extended_buffer_flush_all();
-    shader_core_ctx **m_core; // easier to implement buffer
-    const shader_core_config *m_config; // easier to implement buffer
 private:
     unsigned m_cluster_id;
     gpgpu_sim *m_gpu;
